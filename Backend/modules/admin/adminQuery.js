@@ -5,6 +5,18 @@ module.exports = {
     FROM users 
     WHERE is_deleted = 0
   `,
+  LIST_EMPLOYEES_PAGED: `
+    SELECT id, name, email, role, is_active, created_at
+    FROM users
+    WHERE is_deleted = 0
+    ORDER BY id DESC
+    LIMIT ? OFFSET ?
+  `,
+  COUNT_EMPLOYEES: `
+    SELECT COUNT(*) AS total
+    FROM users
+    WHERE is_deleted = 0
+  `,
   CREATE_EMPLOYEE: `
     INSERT INTO users (name, email, password, role, is_active, is_deleted) 
     VALUES (?, ?, ?, ?, 1, 0)
@@ -22,12 +34,17 @@ module.exports = {
 
   // Category queries
   LIST_CATEGORIES: `
-    SELECT * FROM categories 
-    WHERE is_active = 1
+    SELECT 
+      c.*,
+      COUNT(p.id) AS products_count
+    FROM categories c
+    LEFT JOIN products p ON p.category_id = c.id
+    GROUP BY c.id
+    ORDER BY c.id DESC
   `,
   CREATE_CATEGORY: `
     INSERT INTO categories (name, color, is_active) 
-    VALUES (?, ?, 1)
+    VALUES (?, ?, ?)
   `,
   UPDATE_CATEGORY: `
     UPDATE categories 
@@ -40,19 +57,64 @@ module.exports = {
   `,
 
   // Product queries
+  ENSURE_PRODUCT_IMAGE_COLUMN: `
+    ALTER TABLE products 
+    ADD COLUMN image_url VARCHAR(500) NULL
+  `,
   LIST_PRODUCTS: `
-    SELECT p.*, c.name AS category_name, c.color AS category_color 
+    SELECT 
+      p.*, 
+      c.name AS category_name, 
+      c.color AS category_color,
+      COALESCE(sales.sold, 0) AS sold,
+      COALESCE(sales.revenue, 0) AS revenue
     FROM products p
     JOIN categories c ON p.category_id = c.id
-    WHERE p.is_active = 1
+    LEFT JOIN (
+      SELECT 
+        oi.product_id,
+        SUM(oi.quantity) AS sold,
+        SUM(oi.line_total) AS revenue
+      FROM order_items oi
+      JOIN orders o ON oi.order_id = o.id
+      WHERE o.status IN ('PAID', 'COMPLETED')
+      GROUP BY oi.product_id
+    ) sales ON sales.product_id = p.id
+    ORDER BY p.id DESC
+  `,
+  LIST_PRODUCTS_PAGED: `
+    SELECT
+      p.*,
+      c.name AS category_name,
+      c.color AS category_color,
+      COALESCE(sales.sold, 0) AS sold,
+      COALESCE(sales.revenue, 0) AS revenue
+    FROM products p
+    JOIN categories c ON p.category_id = c.id
+    LEFT JOIN (
+      SELECT
+        oi.product_id,
+        SUM(oi.quantity) AS sold,
+        SUM(oi.line_total) AS revenue
+      FROM order_items oi
+      JOIN orders o ON oi.order_id = o.id
+      WHERE o.status IN ('PAID', 'COMPLETED')
+      GROUP BY oi.product_id
+    ) sales ON sales.product_id = p.id
+    ORDER BY p.id DESC
+    LIMIT ? OFFSET ?
+  `,
+  COUNT_PRODUCTS: `
+    SELECT COUNT(*) AS total
+    FROM products
   `,
   CREATE_PRODUCT: `
-    INSERT INTO products (category_id, name, description, price, unit, tax_percentage, is_active) 
-    VALUES (?, ?, ?, ?, ?, ?, 1)
+    INSERT INTO products (category_id, name, description, price, unit, tax_percentage, is_active, image_url) 
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `,
   UPDATE_PRODUCT: `
     UPDATE products 
-    SET category_id = ?, name = ?, description = ?, price = ?, unit = ?, tax_percentage = ?, is_active = ? 
+    SET category_id = ?, name = ?, description = ?, price = ?, unit = ?, tax_percentage = ?, is_active = ?, image_url = ? 
     WHERE id = ?
   `,
   DELETE_PRODUCT: `
@@ -79,9 +141,14 @@ module.exports = {
   `,
 
   // Table queries
+  ENSURE_TABLE_POS_STATUS_COLUMN: `
+    ALTER TABLE cafe_tables
+    ADD COLUMN pos_status VARCHAR(20) DEFAULT 'available'
+  `,
   LIST_TABLES: `
     SELECT t.*, f.name AS floor_name,
       (SELECT o.id FROM orders o WHERE o.table_id = t.id AND o.status NOT IN ('PAID', 'CANCELLED') LIMIT 1) AS active_order_id,
+      COALESCE(t.pos_status, CASE WHEN EXISTS(SELECT 1 FROM orders o WHERE o.table_id = t.id AND o.status NOT IN ('PAID', 'CANCELLED')) THEN 'active' ELSE 'available' END) AS pos_status,
       EXISTS(SELECT 1 FROM orders o WHERE o.table_id = t.id AND o.status NOT IN ('PAID', 'CANCELLED')) AS has_active_order
     FROM cafe_tables t
     JOIN floors f ON t.floor_id = f.id
@@ -89,17 +156,18 @@ module.exports = {
   LIST_TABLES_BY_FLOOR: `
     SELECT t.*,
       (SELECT o.id FROM orders o WHERE o.table_id = t.id AND o.status NOT IN ('PAID', 'CANCELLED') LIMIT 1) AS active_order_id,
+      COALESCE(t.pos_status, CASE WHEN EXISTS(SELECT 1 FROM orders o WHERE o.table_id = t.id AND o.status NOT IN ('PAID', 'CANCELLED')) THEN 'active' ELSE 'available' END) AS pos_status,
       EXISTS(SELECT 1 FROM orders o WHERE o.table_id = t.id AND o.status NOT IN ('PAID', 'CANCELLED')) AS has_active_order
     FROM cafe_tables t
     WHERE t.floor_id = ?
   `,
   CREATE_TABLE: `
-    INSERT INTO cafe_tables (floor_id, table_number, seats, unique_token, is_active) 
-    VALUES (?, ?, ?, ?, ?)
+    INSERT INTO cafe_tables (floor_id, table_number, seats, unique_token, is_active, pos_status) 
+    VALUES (?, ?, ?, ?, ?, ?)
   `,
   UPDATE_TABLE: `
     UPDATE cafe_tables 
-    SET floor_id = ?, table_number = ?, seats = ?, is_active = ? 
+    SET floor_id = ?, table_number = ?, seats = ?, is_active = ?, pos_status = ? 
     WHERE id = ?
   `,
   DELETE_TABLE: `
@@ -137,7 +205,33 @@ module.exports = {
 
   // Payment Methods
   LIST_PAYMENT_METHODS: `
+    SELECT 
+      pm.*,
+      COALESCE(stats.transactions_today, 0) AS transactions_today,
+      COALESCE(stats.amount_today, 0) AS amount_today,
+      COALESCE(stats.payment_status, 'NO_PAYMENT') AS payment_status
+    FROM payment_methods pm
+    LEFT JOIN (
+      SELECT 
+        UPPER(payment_method) AS method_key,
+        COUNT(*) AS transactions_today,
+        SUM(amount) AS amount_today,
+        payment_status
+      FROM payments
+      WHERE payment_status = 'SUCCESS'
+        AND DATE(created_at) = CURDATE()
+      GROUP BY UPPER(payment_method), payment_status
+    ) stats ON stats.method_key = CASE
+      WHEN UPPER(pm.name) LIKE '%CASH%' THEN 'CASH'
+      WHEN UPPER(pm.name) LIKE '%UPI%' THEN 'UPI'
+      WHEN UPPER(pm.name) LIKE '%CARD%' OR UPPER(pm.name) LIKE '%DIGITAL%' THEN 'CARD'
+      ELSE UPPER(pm.name)
+    END
+    ORDER BY pm.id ASC
+  `,
+  GET_PAYMENT_METHOD_BY_ID: `
     SELECT * FROM payment_methods
+    WHERE id = ?
   `,
   UPDATE_PAYMENT_METHOD: `
     UPDATE payment_methods 
@@ -147,7 +241,13 @@ module.exports = {
 
   // Coupon queries
   LIST_COUPONS: `
-    SELECT * FROM coupons
+    SELECT 
+      c.*,
+      COUNT(o.id) AS redemptions
+    FROM coupons c
+    LEFT JOIN orders o ON o.coupon_id = c.id AND o.status IN ('PAID', 'COMPLETED')
+    GROUP BY c.id
+    ORDER BY c.id DESC
   `,
   CREATE_COUPON: `
     INSERT INTO coupons (code, discount_type, discount_value, expiry_date, is_active) 
@@ -164,18 +264,26 @@ module.exports = {
   `,
 
   // Promotion queries
+  ENSURE_PROMOTION_NAME_COLUMN: `
+    ALTER TABLE promotions
+    ADD COLUMN name VARCHAR(120) NULL
+  `,
   LIST_PROMOTIONS: `
-    SELECT pr.*, p.name AS product_name 
+    SELECT 
+      pr.*, 
+      COALESCE(pr.name, CONCAT(pr.promotion_type, ' Promotion')) AS name,
+      p.name AS product_name 
     FROM promotions pr
     LEFT JOIN products p ON pr.product_id = p.id
+    ORDER BY pr.id DESC
   `,
   CREATE_PROMOTION: `
-    INSERT INTO promotions (promotion_type, product_id, min_quantity, min_order_amount, discount_type, discount_value, is_active) 
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO promotions (name, promotion_type, product_id, min_quantity, min_order_amount, discount_type, discount_value, is_active) 
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `,
   UPDATE_PROMOTION: `
     UPDATE promotions 
-    SET promotion_type = ?, product_id = ?, min_quantity = ?, min_order_amount = ?, discount_type = ?, discount_value = ?, is_active = ? 
+    SET name = ?, promotion_type = ?, product_id = ?, min_quantity = ?, min_order_amount = ?, discount_type = ?, discount_value = ?, is_active = ? 
     WHERE id = ?
   `,
   DELETE_PROMOTION: `
@@ -225,6 +333,23 @@ module.exports = {
       u.name AS employee_name
     FROM pos_sessions s
     JOIN users u ON s.employee_id = u.id
+    ORDER BY s.opening_time DESC
+  `,
+
+  LIST_POS_SESSIONS: `
+    SELECT
+      s.*,
+      u.name AS employee_name,
+      COUNT(DISTINCT o.id) AS orders_count,
+      COALESCE(SUM(CASE WHEN UPPER(p.payment_method) = 'CASH' THEN p.amount ELSE 0 END), 0) AS cash_sales,
+      COALESCE(SUM(CASE WHEN UPPER(p.payment_method) = 'UPI' THEN p.amount ELSE 0 END), 0) AS upi_sales,
+      COALESCE(SUM(CASE WHEN UPPER(p.payment_method) = 'CARD' THEN p.amount ELSE 0 END), 0) AS card_sales,
+      COALESCE(SUM(CASE WHEN p.payment_status = 'SUCCESS' THEN p.amount ELSE 0 END), 0) AS total_sales
+    FROM pos_sessions s
+    JOIN users u ON s.employee_id = u.id
+    LEFT JOIN orders o ON o.session_id = s.id
+    LEFT JOIN payments p ON p.order_id = o.id
+    GROUP BY s.id, u.name
     ORDER BY s.opening_time DESC
   `
 };

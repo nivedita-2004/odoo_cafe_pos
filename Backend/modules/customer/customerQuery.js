@@ -38,5 +38,42 @@ module.exports = {
     WHERE t.unique_token = ? AND o.status NOT IN ('PAID', 'CANCELLED')
     ORDER BY o.created_at DESC
     LIMIT 1
+  `,
+
+  GET_ORDER_FOR_TABLE: `
+    SELECT o.*, t.table_number, f.name AS floor_name
+    FROM orders o
+    JOIN cafe_tables t ON o.table_id = t.id
+    JOIN floors f ON t.floor_id = f.id
+    WHERE o.id = ? AND t.unique_token = ?
+    LIMIT 1
+  `,
+
+  GET_ORDER_HISTORY_FOR_TABLE: `
+    SELECT
+      o.id,
+      o.order_number,
+      o.status,
+      o.total_amount,
+      o.created_at,
+      COALESCE(p.payment_status, 'PENDING') AS payment_status
+    FROM orders o
+    JOIN cafe_tables t ON o.table_id = t.id
+    LEFT JOIN (
+      SELECT order_id, payment_status
+      FROM payments
+      WHERE id IN (SELECT MAX(id) FROM payments GROUP BY order_id)
+    ) p ON p.order_id = o.id
+    WHERE t.unique_token = ?
+    ORDER BY o.created_at DESC
+    LIMIT 20
+  `,
+
+  GET_ITEMS_FOR_ORDERS: `
+    SELECT oi.*, p.name AS product_name
+    FROM order_items oi
+    JOIN products p ON oi.product_id = p.id
+    WHERE oi.order_id IN (?)
+    ORDER BY oi.order_id ASC, oi.id ASC
   `
 };

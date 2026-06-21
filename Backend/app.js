@@ -2,6 +2,9 @@ const express = require("express");
 const cors = require("cors");
 const path = require("path");
 const rateLimit = require("express-rate-limit");
+const compression = require("compression");
+const helmet = require("helmet");
+const hpp = require("hpp");
 const errorHandler = require("./middleware/errorMiddleware");
 // Import Routes
 const authRoutes = require("./modules/auth/authRoutes");
@@ -14,6 +17,9 @@ const reportRoutes = require("./modules/report/reportRoutes");
 const app = express();
 
 
+app.use(helmet());
+app.use(compression());
+app.use(hpp());
 
 app.use(cors({
   origin: process.env.FRONTEND_URL || "http://localhost:5173",
@@ -24,12 +30,19 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 
-app.use("/uploads", express.static(path.join(__dirname, "uploads")));
+app.use(
+  "/uploads",
+  (req, res, next) => {
+    res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+    next();
+  },
+  express.static(path.join(__dirname, "uploads"))
+);
 
 
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 mins
-  max: 300, 
+  max: 2000,
   message: {
     success: false,
     message: "Too many requests from this IP, please try again after 15 minutes."

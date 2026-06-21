@@ -4,6 +4,40 @@ const QRCode = require("qrcode");
 const PDFDocument = require("pdfkit");
 const nodemailer = require("nodemailer");
 const socketService = require("../../sockets/socketService");
+const crypto = require("crypto");
+const { getRazorpayClient } = require("../../config/razorpay");
+
+const tableQrCache = new Map();
+
+async function getCachedTableQr(url) {
+  const cached = tableQrCache.get(url);
+  if (cached) return cached;
+
+  const qrDataUrl = await QRCode.toDataURL(url);
+  tableQrCache.set(url, qrDataUrl);
+  return qrDataUrl;
+}
+
+function getPagination(query) {
+  if (query.page === undefined && query.limit === undefined) return null;
+
+  const page = Math.max(parseInt(query.page, 10) || 1, 1);
+  const limit = Math.min(Math.max(parseInt(query.limit, 10) || 20, 1), 100);
+  return {
+    page,
+    limit,
+    offset: (page - 1) * limit
+  };
+}
+
+function paginationMeta(total, pagination) {
+  return {
+    page: pagination.page,
+    limit: pagination.limit,
+    total,
+    totalPages: Math.ceil(total / pagination.limit)
+  };
+}
 
 // Nodemailer Config
 const transporter = nodemailer.createTransport({
@@ -131,6 +165,38 @@ async function closeSession(req, res, next) {
   }
 }
 
+async function listPosTables(req, res, next) {
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    const [tables] = await connection.query(employeeQueries.LIST_POS_TABLES);
+    const frontendUrl = process.env.FRONTEND_URL || "http://localhost:5173";
+    const tablesWithQr = await Promise.all(
+      tables.map(async (table) => {
+        const url = `${frontendUrl}/table/${table.unique_token}`;
+        const qrDataUrl = await getCachedTableQr(url);
+        return { ...table, qrUrl: url, qrDataUrl };
+      })
+    );
+    res.status(200).json({ success: true, tables: tablesWithQr });
+  } catch (error) {
+    next(error);
+  } finally {
+    if (connection) connection.release();
+  }
+}
+
+async function getTableQRCode(req, res, next) {
+  const { token } = req.params;
+  try {
+    const url = `${process.env.FRONTEND_URL || "http://localhost:5173"}/table/${token}`;
+    const qrDataUrl = await getCachedTableQr(url);
+    res.status(200).json({ success: true, url, qrDataUrl });
+  } catch (error) {
+    next(error);
+  }
+}
+
 //customer management
 
 async function searchCustomers(req, res, next) {
@@ -226,10 +292,15 @@ async function deleteCustomer(req, res, next) {
 
 // Pricing, Coupon and Promotions Engine
 
+const toPositiveNumber = (value) => Math.max(parseFloat(value) || 0, 0);
+const clampDiscount = (value, maxAmount) => Math.min(toPositiveNumber(value), Math.max(maxAmount, 0));
+
 async function calculateOrderDetails(connection, items, couponCode) {
   let subtotal = 0;
   let tax_amount = 0;
   let discount_amount = 0;
+  let promotion_discount_amount = 0;
+  let coupon_discount_amount = 0;
 
   const itemsWithTotals = [];
   
@@ -240,16 +311,17 @@ async function calculateOrderDetails(connection, items, couponCode) {
       throw new Error(`Product with ID ${item.product_id} not found or inactive`);
     }
     const product = products[0];
-    const unitPrice = parseFloat(product.price);
-    const itemSubtotal = unitPrice * item.quantity;
+    const unitPrice = toPositiveNumber(product.price);
+    const quantity = toPositiveNumber(item.quantity);
+    const itemSubtotal = unitPrice * quantity;
 
     subtotal += itemSubtotal;
 
     itemsWithTotals.push({
       product_id: item.product_id,
-      quantity: item.quantity,
+      quantity,
       unit_price: unitPrice,
-      tax_percentage: parseFloat(product.tax_percentage),
+      tax_percentage: toPositiveNumber(product.tax_percentage),
       item_subtotal: itemSubtotal,
       discount_amount: 0, // calculated later
       tax_amount: 0, // calculated later
@@ -268,11 +340,13 @@ async function calculateOrderDetails(connection, items, couponCode) {
     for (const promo of productPromos) {
       if (item.quantity >= promo.min_quantity) {
         let promoDiscount = 0;
+        const discountValue = toPositiveNumber(promo.discount_value);
         if (promo.discount_type === "PERCENTAGE") {
-          promoDiscount = grossSubtotal * (parseFloat(promo.discount_value) / 100);
+          promoDiscount = grossSubtotal * (discountValue / 100);
         } else if (promo.discount_type === "FIXED") {
-          promoDiscount = parseFloat(promo.discount_value);
+          promoDiscount = discountValue;
         }
+        promoDiscount = clampDiscount(promoDiscount, grossSubtotal);
         if (promoDiscount > bestPromotionDiscount) {
           bestPromotionDiscount = promoDiscount;
         }
@@ -283,20 +357,22 @@ async function calculateOrderDetails(connection, items, couponCode) {
   // Check order-level promotions
   const [orderPromos] = await connection.query(employeeQueries.GET_ACTIVE_ORDER_PROMOTIONS);
   for (const promo of orderPromos) {
-    if (grossSubtotal >= parseFloat(promo.min_order_amount)) {
+    if (grossSubtotal >= toPositiveNumber(promo.min_order_amount)) {
       let promoDiscount = 0;
+      const discountValue = toPositiveNumber(promo.discount_value);
       if (promo.discount_type === "PERCENTAGE") {
-        promoDiscount = grossSubtotal * (parseFloat(promo.discount_value) / 100);
+        promoDiscount = grossSubtotal * (discountValue / 100);
       } else if (promo.discount_type === "FIXED") {
-        promoDiscount = parseFloat(promo.discount_value);
+        promoDiscount = discountValue;
       }
+      promoDiscount = clampDiscount(promoDiscount, grossSubtotal);
       if (promoDiscount > bestPromotionDiscount) {
         bestPromotionDiscount = promoDiscount;
       }
     }
   }
 
-  discount_amount += bestPromotionDiscount;
+  promotion_discount_amount = clampDiscount(bestPromotionDiscount, grossSubtotal);
 
   // 3. Coupon Codes
   let couponId = null;
@@ -306,44 +382,114 @@ async function calculateOrderDetails(connection, items, couponCode) {
       const coupon = coupons[0];
       couponId = coupon.id;
       let couponDiscount = 0;
+      const discountValue = toPositiveNumber(coupon.discount_value);
       if (coupon.discount_type === "PERCENTAGE") {
-        couponDiscount = grossSubtotal * (parseFloat(coupon.discount_value) / 100);
+        couponDiscount = grossSubtotal * (discountValue / 100);
       } else if (coupon.discount_type === "FIXED") {
-        couponDiscount = parseFloat(coupon.discount_value);
+        couponDiscount = discountValue;
       }
-      discount_amount += couponDiscount;
+      coupon_discount_amount = clampDiscount(couponDiscount, grossSubtotal - promotion_discount_amount);
     }
   }
 
-  // Bound total discount to gross subtotal
-  if (discount_amount > grossSubtotal) {
-    discount_amount = grossSubtotal;
-  }
+  discount_amount = promotion_discount_amount + coupon_discount_amount;
 
-  // Apportion discount and calculate taxes
-  // For simplicity, we calculate tax based on gross item subtotal.
+  // Apportion discount first, then calculate tax on the discounted taxable amount.
   for (const item of itemsWithTotals) {
-    // Apportioned discount for this line (proportional to item share)
     const share = grossSubtotal > 0 ? (item.item_subtotal / grossSubtotal) : 0;
     item.discount_amount = parseFloat((discount_amount * share).toFixed(2));
-    
-    // Tax computed on gross item subtotal (standard)
-    item.tax_amount = parseFloat((item.item_subtotal * (item.tax_percentage / 100)).toFixed(2));
-    item.line_total = parseFloat((item.item_subtotal + item.tax_amount - item.discount_amount).toFixed(2));
+
+    const taxableAmount = Math.max(item.item_subtotal - item.discount_amount, 0);
+    item.tax_amount = parseFloat((taxableAmount * (item.tax_percentage / 100)).toFixed(2));
+    item.line_total = parseFloat((taxableAmount + item.tax_amount).toFixed(2));
 
     tax_amount += item.tax_amount;
   }
 
-  const total_amount = parseFloat((grossSubtotal + tax_amount - discount_amount).toFixed(2));
+  const total_amount = parseFloat((grossSubtotal - discount_amount + tax_amount).toFixed(2));
 
   return {
     subtotal: grossSubtotal,
     tax_amount: parseFloat(tax_amount.toFixed(2)),
     discount_amount: parseFloat(discount_amount.toFixed(2)),
+    promotion_discount_amount: parseFloat(promotion_discount_amount.toFixed(2)),
+    coupon_discount_amount: parseFloat(coupon_discount_amount.toFixed(2)),
     total_amount,
     coupon_id: couponId,
     itemsWithTotals
   };
+}
+
+async function previewOrderTotals(req, res, next) {
+  const { coupon_code, items } = req.body;
+
+  if (!items || !Array.isArray(items) || items.length === 0) {
+    return res.status(400).json({ success: false, message: "Items array is required" });
+  }
+
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    const calculation = await calculateOrderDetails(connection, items, coupon_code);
+
+    res.status(200).json({
+      success: true,
+      totals: {
+        subtotal: calculation.subtotal,
+        tax: calculation.tax_amount,
+        productDiscount: calculation.promotion_discount_amount,
+        orderDiscount: 0,
+        couponDiscount: calculation.coupon_discount_amount,
+        total: calculation.total_amount
+      }
+    });
+  } catch (error) {
+    next(error);
+  } finally {
+    if (connection) connection.release();
+  }
+}
+
+async function applyEmployeeCoupon(req, res, next) {
+  const { coupon_code, order_amount } = req.body;
+
+  if (!coupon_code) {
+    return res.status(400).json({ success: false, message: "Coupon code is required" });
+  }
+
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    const [coupons] = await connection.query(employeeQueries.GET_ACTIVE_COUPON, [coupon_code.trim()]);
+
+    if (coupons.length === 0) {
+      return res.status(404).json({ success: false, message: "Invalid coupon code" });
+    }
+
+    const coupon = coupons[0];
+    const amount = toPositiveNumber(order_amount);
+    const discountValue = toPositiveNumber(coupon.discount_value);
+    const rawDiscountAmount =
+      coupon.discount_type === "PERCENTAGE"
+        ? (amount * discountValue) / 100
+        : discountValue;
+    const discountAmount = clampDiscount(rawDiscountAmount, amount);
+
+    res.status(200).json({
+      success: true,
+      coupon: {
+        id: coupon.id,
+        code: coupon.code,
+        type: coupon.discount_type === "PERCENTAGE" ? "percent" : "fixed",
+        value: discountValue,
+        discountAmount: parseFloat(discountAmount.toFixed(2))
+      }
+    });
+  } catch (error) {
+    next(error);
+  } finally {
+    if (connection) connection.release();
+  }
 }
 
 // ==========================================
@@ -435,8 +581,10 @@ async function getOrder(req, res, next) {
     }
 
     const [items] = await connection.query(employeeQueries.GET_ORDER_ITEMS, [id]);
+    const [payments] = await connection.query(employeeQueries.GET_PAYMENTS_FOR_ORDER, [id]);
     const order = orders[0];
     order.items = items;
+    order.payments = payments;
 
     res.status(200).json({ success: true, order });
   } catch (error) {
@@ -588,12 +736,162 @@ async function getUPIQrCode(req, res, next) {
   }
 }
 
+async function createEmployeeRazorpayOrder(req, res, next) {
+  const { id } = req.params;
+  let connection;
+  try {
+    connection = await pool.getConnection();
+
+    const [orders] = await connection.query("SELECT id, order_number, table_id, total_amount FROM orders WHERE id = ?", [id]);
+    if (orders.length === 0) {
+      return res.status(404).json({ success: false, message: "Order not found" });
+    }
+    const order = orders[0];
+
+    const [payments] = await connection.query(employeeQueries.GET_PAYMENTS_FOR_ORDER, [id]);
+    if (payments.some((payment) => payment.payment_status === "SUCCESS")) {
+      return res.status(400).json({ success: false, message: "Payment already completed for this order" });
+    }
+
+    const amount = Math.round(parseFloat(order.total_amount) * 100);
+    if (!amount || amount <= 0) {
+      return res.status(400).json({ success: false, message: "Invalid order amount" });
+    }
+
+    const razorpay = getRazorpayClient();
+    const razorpayOrder = await razorpay.orders.create({
+      amount,
+      currency: process.env.RAZORPAY_CURRENCY || "INR",
+      receipt: order.order_number,
+      notes: {
+        orderId: String(order.id),
+        tableId: String(order.table_id || "")
+      }
+    });
+
+    res.status(200).json({
+      success: true,
+      key: process.env.RAZORPAY_KEY_ID,
+      razorpayOrderId: razorpayOrder.id,
+      amount: razorpayOrder.amount,
+      currency: razorpayOrder.currency,
+      orderNumber: order.order_number,
+      orderId: order.id
+    });
+  } catch (error) {
+    next(error);
+  } finally {
+    if (connection) connection.release();
+  }
+}
+
+async function verifyEmployeeRazorpayPayment(req, res, next) {
+  const { id } = req.params;
+  const {
+    payment_method,
+    razorpay_order_id,
+    razorpay_payment_id,
+    razorpay_signature
+  } = req.body;
+
+  const method = String(payment_method || "").toUpperCase();
+  if (!["CARD", "UPI"].includes(method)) {
+    return res.status(400).json({ success: false, message: "Valid Razorpay payment method is required" });
+  }
+
+  if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
+    return res.status(400).json({ success: false, message: "Razorpay payment details are required" });
+  }
+
+  if (!process.env.RAZORPAY_KEY_SECRET) {
+    return res.status(500).json({ success: false, message: "Razorpay credentials are not configured" });
+  }
+
+  const expectedSignature = crypto
+    .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
+    .update(`${razorpay_order_id}|${razorpay_payment_id}`)
+    .digest("hex");
+
+  const expectedBuffer = Buffer.from(expectedSignature);
+  const receivedBuffer = Buffer.from(razorpay_signature);
+
+  if (
+    expectedBuffer.length !== receivedBuffer.length ||
+    !crypto.timingSafeEqual(expectedBuffer, receivedBuffer)
+  ) {
+    return res.status(400).json({ success: false, message: "Payment verification failed" });
+  }
+
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+
+    const [orders] = await connection.query("SELECT * FROM orders WHERE id = ?", [id]);
+    if (orders.length === 0) {
+      await connection.rollback();
+      return res.status(404).json({ success: false, message: "Order not found" });
+    }
+    const order = orders[0];
+
+    const [payments] = await connection.query(employeeQueries.GET_PAYMENTS_FOR_ORDER, [id]);
+    if (payments.some((payment) => payment.payment_status === "SUCCESS")) {
+      await connection.rollback();
+      return res.status(400).json({ success: false, message: "Payment already completed for this order" });
+    }
+
+    await connection.query(employeeQueries.RECORD_PAYMENT, [
+      id,
+      method,
+      razorpay_payment_id,
+      order.total_amount
+    ]);
+
+    const shouldSendToKitchen = order.status === "DRAFT";
+
+    if (shouldSendToKitchen) {
+      await connection.query(employeeQueries.UPDATE_ORDER_STATUS, ["TO_COOK", id]);
+      await connection.query(employeeQueries.UPDATE_ORDER_ITEMS_STATUS, ["TO_COOK", id]);
+    }
+
+    await connection.commit();
+
+    if (shouldSendToKitchen) {
+      const [updatedOrders] = await connection.query(employeeQueries.GET_ORDER, [id]);
+      const [items] = await connection.query(employeeQueries.GET_ORDER_ITEMS, [id]);
+      const orderData = updatedOrders[0];
+      orderData.items = items;
+      socketService.notifyNewOrderToKitchen(orderData);
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "Razorpay payment verified successfully",
+      orderId: id,
+      paymentStatus: "SUCCESS",
+      transactionReference: razorpay_payment_id
+    });
+  } catch (error) {
+    if (connection) await connection.rollback();
+    next(error);
+  } finally {
+    if (connection) connection.release();
+  }
+}
+
 async function payOrder(req, res, next) {
   const { id } = req.params;
   const { payment_method, transaction_reference, amount, send_email } = req.body;
 
   if (!payment_method || amount === undefined) {
     return res.status(400).json({ success: false, message: "Payment method and paid amount are required" });
+  }
+
+  if (["CARD", "UPI", "RAZORPAY"].includes(String(payment_method).toUpperCase())) {
+    return res.status(410).json({
+      success: false,
+      message: "Manual online payment is disabled. Please use Razorpay checkout."
+    });
   }
 
   let connection;
@@ -621,10 +919,22 @@ async function payOrder(req, res, next) {
       amount
     ]);
 
-    // Update order status to PAID
-    await connection.query(employeeQueries.UPDATE_ORDER_STATUS, ["PAID", id]);
+    const shouldSendToKitchen = order.status === "DRAFT";
+
+    if (shouldSendToKitchen) {
+      await connection.query(employeeQueries.UPDATE_ORDER_STATUS, ["TO_COOK", id]);
+      await connection.query(employeeQueries.UPDATE_ORDER_ITEMS_STATUS, ["TO_COOK", id]);
+    }
 
     await connection.commit();
+
+    if (shouldSendToKitchen) {
+      const [updatedOrders] = await connection.query(employeeQueries.GET_ORDER, [id]);
+      const [items] = await connection.query(employeeQueries.GET_ORDER_ITEMS, [id]);
+      const orderData = updatedOrders[0];
+      orderData.items = items;
+      socketService.notifyNewOrderToKitchen(orderData);
+    }
 
     // Optionally send email receipt if requested
     if (send_email && order.customer_id) {
@@ -687,7 +997,9 @@ async function payOrder(req, res, next) {
 
     res.status(200).json({
       success: true,
-      message: "Payment successfully recorded, order updated to PAID",
+      message: shouldSendToKitchen
+        ? "Payment successfully recorded, order sent to kitchen"
+        : "Payment successfully recorded",
       orderId: id,
       paymentStatus: "SUCCESS"
     });
@@ -767,10 +1079,26 @@ async function getReceiptPDF(req, res, next) {
 async function listOrders(req, res, next) {
   const { status } = req.query;
   const statusPattern = status ? status : "%";
+  const pagination = getPagination(req.query);
 
   let connection;
   try {
     connection = await pool.getConnection();
+
+    if (pagination) {
+      const [orders] = await connection.query(employeeQueries.LIST_ORDERS_PAGED, [
+        statusPattern,
+        pagination.limit,
+        pagination.offset
+      ]);
+      const [[countRow]] = await connection.query(employeeQueries.COUNT_ORDERS, [statusPattern]);
+      return res.status(200).json({
+        success: true,
+        orders,
+        pagination: paginationMeta(countRow.total, pagination)
+      });
+    }
+
     const [orders] = await connection.query(employeeQueries.LIST_ORDERS, [statusPattern]);
     res.status(200).json({ success: true, orders });
   } catch (error) {
@@ -838,17 +1166,23 @@ async function sendToKitchen(req, res, next) {
 module.exports = {
   getActiveSession,
   getLastSession,
+  listPosTables,
+  getTableQRCode,
   openSession,
   closeSession,
   searchCustomers,
   createCustomer,
   updateCustomer,
   deleteCustomer,
+  previewOrderTotals,
+  applyEmployeeCoupon,
   createOrder,
   getOrder,
   updateOrder,
   updateOrderStatus,
   getUPIQrCode,
+  createEmployeeRazorpayOrder,
+  verifyEmployeeRazorpayPayment,
   payOrder,
   getReceiptPDF,
   listOrders,

@@ -93,7 +93,8 @@ const {
   // Settings
   getSettings,
   updateSettings,
-  uploadBackgroundImage
+  uploadBackgroundImage,
+  listPosSessions
 } = require("./adminController");
 
 // Apply Auth and Role checks globally to all admin routes
@@ -116,8 +117,8 @@ router.delete("/categories/:id", deleteCategory);
 
 // Products
 router.get("/products", listProducts);
-router.post("/products", createProduct);
-router.put("/products/:id", updateProduct);
+router.post("/products", upload.single("image"), createProduct);
+router.put("/products/:id", upload.single("image"), updateProduct);
 router.delete("/products/:id", deleteProduct);
 
 // Floors
@@ -158,5 +159,8 @@ router.get("/reports/export/pdf", exportPDFReport);
 router.get("/settings", getSettings);
 router.put("/settings", updateSettings);
 router.post("/settings/upload", upload.single("image"), uploadBackgroundImage);
+
+// POS Sessions
+router.get("/pos-sessions", listPosSessions);
 
 module.exports = router;

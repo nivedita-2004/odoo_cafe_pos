@@ -8,14 +8,15 @@ const {
   getTopProducts,
   getTopCategories,
   getTopOrders,
-  getSalesTrend
+  getSalesTrend,
+  getAdminDashboard
 } = require("./reportController");
 
-// Restrict all reporting endpoints to administrators only
 router.use(protect);
 router.use(authorize("ADMIN"));
 
 router.get("/dashboard", getDashboardStats);
+router.get("/admin-dashboard", getAdminDashboard);
 router.get("/top-products", getTopProducts);
 router.get("/top-categories", getTopCategories);
 router.get("/top-orders", getTopOrders);

@@ -2,6 +2,10 @@ const { pool } = require("../../config/db");
 const customerQueries = require("./customerQuery");
 const employeeQueries = require("../employee/employeeQuery");
 const { calculateOrderDetails } = require("../employee/employeeController");
+const socketService = require("../../sockets/socketService");
+const crypto = require("crypto");
+const QRCode = require("qrcode");
+const { getRazorpayClient } = require("../../config/razorpay");
 
 
 async function getCustomerMenu(req, res, next) {
@@ -24,6 +28,7 @@ async function getCustomerMenu(req, res, next) {
         id: p.id,
         name: p.name,
         description: p.description,
+        image_url: p.image_url,
         price: parseFloat(p.price),
         unit: p.unit,
         tax_percentage: parseFloat(p.tax_percentage)
@@ -151,13 +156,7 @@ async function placeSelfOrder(req, res, next) {
     await connection.commit();
 
     // 8. Notify kitchen display KDS in real time via Socket.io
-    try {
-      const { getSocketIO } = require("../../config/socket");
-      const io = getSocketIO();
-      io.to("kitchen").emit("kitchen:orderUpdated", { orderId, status: "TO_COOK" });
-    } catch (wsErr) {
-      console.warn("KDS socket notify failed:", wsErr.message);
-    }
+    socketService.notifyNewOrderToKitchen({ orderId, status: "TO_COOK" });
 
     res.status(201).json({
       success: true,
@@ -188,11 +187,13 @@ async function trackOrderStatus(req, res, next) {
       return res.status(404).json({ success: false, message: "Order not found" });
     }
     const [items] = await connection.query(employeeQueries.GET_ORDER_ITEMS, [id]);
+    const [payments] = await connection.query(employeeQueries.GET_PAYMENTS_FOR_ORDER, [id]);
     res.status(200).json({
       success: true,
       order: {
         ...orders[0],
-        items
+        items,
+        payments
       }
     });
   } catch (error) {
@@ -200,6 +201,212 @@ async function trackOrderStatus(req, res, next) {
   } finally {
     if (connection) connection.release();
   }
+}
+
+async function getCustomerOrderHistory(req, res, next) {
+  const { token } = req.params;
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    const [orders] = await connection.query(customerQueries.GET_ORDER_HISTORY_FOR_TABLE, [token]);
+
+    if (orders.length > 0) {
+      const orderIds = orders.map((order) => order.id);
+      const [items] = await connection.query(customerQueries.GET_ITEMS_FOR_ORDERS, [orderIds]);
+      const itemsByOrder = items.reduce((result, item) => {
+        if (!result[item.order_id]) result[item.order_id] = [];
+        result[item.order_id].push(item);
+        return result;
+      }, {});
+
+      orders.forEach((order) => {
+        order.items = itemsByOrder[order.id] || [];
+      });
+    }
+
+    res.status(200).json({ success: true, orders });
+  } catch (error) {
+    next(error);
+  } finally {
+    if (connection) connection.release();
+  }
+}
+
+async function getCustomerUPIQrCode(req, res, next) {
+  const { id } = req.params;
+  const { table_token } = req.query;
+
+  if (!table_token) {
+    return res.status(400).json({ success: false, message: "Table token is required" });
+  }
+
+  let connection;
+  try {
+    connection = await pool.getConnection();
+
+    const [orders] = await connection.query(customerQueries.GET_ORDER_FOR_TABLE, [id, table_token]);
+    if (orders.length === 0) {
+      return res.status(404).json({ success: false, message: "Order not found for this table" });
+    }
+    const order = orders[0];
+
+    const [upiMethod] = await connection.query(employeeQueries.GET_UPI_PAYMENT_METHOD);
+    if (upiMethod.length === 0 || !upiMethod[0].upi_id) {
+      return res.status(400).json({ success: false, message: "UPI QR Payment is not currently enabled" });
+    }
+
+    const upiId = upiMethod[0].upi_id;
+    const upiLink = `upi://pay?pa=${upiId}&pn=Odoo%20Cafe%20POS&am=${parseFloat(order.total_amount).toFixed(2)}&tn=${order.order_number}`;
+    const qrDataUrl = await QRCode.toDataURL(upiLink);
+
+    res.status(200).json({
+      success: true,
+      upi_id: upiId,
+      upi_link: upiLink,
+      qrDataUrl,
+      amount: parseFloat(order.total_amount)
+    });
+  } catch (error) {
+    next(error);
+  } finally {
+    if (connection) connection.release();
+  }
+}
+
+async function createCustomerRazorpayOrder(req, res, next) {
+  const { id } = req.params;
+  const { table_token } = req.body;
+
+  if (!table_token) {
+    return res.status(400).json({ success: false, message: "Table token is required" });
+  }
+
+  let connection;
+  try {
+    connection = await pool.getConnection();
+
+    const [orders] = await connection.query(customerQueries.GET_ORDER_FOR_TABLE, [id, table_token]);
+    if (orders.length === 0) {
+      return res.status(404).json({ success: false, message: "Order not found for this table" });
+    }
+    const order = orders[0];
+
+    const [payments] = await connection.query(employeeQueries.GET_PAYMENTS_FOR_ORDER, [id]);
+    if (payments.some((payment) => payment.payment_status === "SUCCESS")) {
+      return res.status(400).json({ success: false, message: "Payment already completed for this order" });
+    }
+
+    const amount = Math.round(parseFloat(order.total_amount) * 100);
+    if (!amount || amount <= 0) {
+      return res.status(400).json({ success: false, message: "Invalid order amount" });
+    }
+
+    const razorpay = getRazorpayClient();
+    const razorpayOrder = await razorpay.orders.create({
+      amount,
+      currency: process.env.RAZORPAY_CURRENCY || "INR",
+      receipt: order.order_number,
+      notes: {
+        orderId: String(order.id),
+        tableId: String(order.table_id)
+      }
+    });
+
+    res.status(200).json({
+      success: true,
+      key: process.env.RAZORPAY_KEY_ID,
+      razorpayOrderId: razorpayOrder.id,
+      amount: razorpayOrder.amount,
+      currency: razorpayOrder.currency,
+      orderNumber: order.order_number,
+      orderId: order.id
+    });
+  } catch (error) {
+    next(error);
+  } finally {
+    if (connection) connection.release();
+  }
+}
+
+async function verifyCustomerRazorpayPayment(req, res, next) {
+  const { id } = req.params;
+  const {
+    table_token,
+    razorpay_order_id,
+    razorpay_payment_id,
+    razorpay_signature
+  } = req.body;
+
+  if (!table_token || !razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
+    return res.status(400).json({ success: false, message: "Razorpay payment details are required" });
+  }
+
+  if (!process.env.RAZORPAY_KEY_SECRET) {
+    return res.status(500).json({ success: false, message: "Razorpay credentials are not configured" });
+  }
+
+  const expectedSignature = crypto
+    .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
+    .update(`${razorpay_order_id}|${razorpay_payment_id}`)
+    .digest("hex");
+
+  const expectedBuffer = Buffer.from(expectedSignature);
+  const receivedBuffer = Buffer.from(razorpay_signature);
+
+  if (
+    expectedBuffer.length !== receivedBuffer.length ||
+    !crypto.timingSafeEqual(expectedBuffer, receivedBuffer)
+  ) {
+    return res.status(400).json({ success: false, message: "Payment verification failed" });
+  }
+
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+
+    const [orders] = await connection.query(customerQueries.GET_ORDER_FOR_TABLE, [id, table_token]);
+    if (orders.length === 0) {
+      await connection.rollback();
+      return res.status(404).json({ success: false, message: "Order not found for this table" });
+    }
+    const order = orders[0];
+
+    const [payments] = await connection.query(employeeQueries.GET_PAYMENTS_FOR_ORDER, [id]);
+    if (payments.some((payment) => payment.payment_status === "SUCCESS")) {
+      await connection.rollback();
+      return res.status(400).json({ success: false, message: "Payment already completed for this order" });
+    }
+
+    await connection.query(employeeQueries.RECORD_PAYMENT, [
+      id,
+      "RAZORPAY",
+      razorpay_payment_id,
+      order.total_amount
+    ]);
+
+    await connection.commit();
+
+    res.status(200).json({
+      success: true,
+      message: "Razorpay payment verified successfully",
+      orderId: id,
+      paymentStatus: "SUCCESS",
+      transactionReference: razorpay_payment_id
+    });
+  } catch (error) {
+    if (connection) await connection.rollback();
+    next(error);
+  } finally {
+    if (connection) connection.release();
+  }
+}
+
+async function payCustomerOrder(req, res, next) {
+  return res.status(410).json({
+    success: false,
+    message: "Manual customer payment is disabled. Please use Razorpay checkout."
+  });
 }
 
 /**
@@ -283,6 +490,11 @@ module.exports = {
   getTableDetails,
   placeSelfOrder,
   trackOrderStatus,
+  getCustomerOrderHistory,
+  getCustomerUPIQrCode,
+  createCustomerRazorpayOrder,
+  verifyCustomerRazorpayPayment,
+  payCustomerOrder,
   getCustomerDisplay,
   applyCoupon
 };

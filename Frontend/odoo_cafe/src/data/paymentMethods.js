@@ -1,0 +1,30 @@
+export const paymentMethods = [
+  {
+    id: 'cash',
+    name: 'Cash',
+    description: 'Available at checkout when enabled.',
+    enabled: true,
+    settlement: 'Instant',
+    transactionsToday: 18,
+    amountToday: 12450,
+  },
+  {
+    id: 'digital-card',
+    name: 'Digital/Card',
+    description: 'Represents card and bank payments.',
+    enabled: true,
+    settlement: 'T+1 Day',
+    transactionsToday: 14,
+    amountToday: 18600,
+  },
+  {
+    id: 'upi-qr',
+    name: 'UPI QR',
+    description: 'Requires a UPI ID. QR code is generated dynamically at payment.',
+    enabled: true,
+    settlement: 'Instant',
+    transactionsToday: 22,
+    amountToday: 21400,
+    upiId: 'cafe@ybl',
+  },
+]

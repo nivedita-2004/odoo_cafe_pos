@@ -27,6 +27,24 @@ module.exports = {
     LIMIT 1
   `,
 
+  LIST_POS_TABLES: `
+    SELECT
+      t.id,
+      t.floor_id,
+      t.table_number,
+      t.seats,
+      t.unique_token,
+      t.is_active,
+      f.name AS floor_name,
+      (SELECT o.id FROM orders o WHERE o.table_id = t.id AND o.status NOT IN ('PAID', 'CANCELLED') LIMIT 1) AS active_order_id,
+      (SELECT o.total_amount FROM orders o WHERE o.table_id = t.id AND o.status NOT IN ('PAID', 'CANCELLED') LIMIT 1) AS active_order_amount,
+      COALESCE(t.pos_status, CASE WHEN EXISTS(SELECT 1 FROM orders o WHERE o.table_id = t.id AND o.status NOT IN ('PAID', 'CANCELLED')) THEN 'active' ELSE 'available' END) AS pos_status
+    FROM cafe_tables t
+    JOIN floors f ON t.floor_id = f.id
+    WHERE t.is_active = 1
+    ORDER BY f.id ASC, CAST(t.table_number AS UNSIGNED) ASC, t.table_number ASC
+  `,
+
   // Customer queries
   SEARCH_CUSTOMERS: `
     SELECT * FROM customers 
@@ -55,7 +73,7 @@ module.exports = {
   `,
   GET_ACTIVE_COUPON: `
     SELECT * FROM coupons 
-    WHERE code = ? AND is_active = 1 AND (expiry_date IS NULL OR expiry_date >= CURDATE())
+    WHERE UPPER(code) = UPPER(?) AND is_active = 1 AND (expiry_date IS NULL OR expiry_date >= CURDATE())
   `,
   GET_ACTIVE_PRODUCT_PROMOTIONS: `
     SELECT * FROM promotions 
@@ -68,13 +86,56 @@ module.exports = {
 
   // Order CRUD
   LIST_ORDERS: `
-    SELECT o.*, t.table_number, f.name AS floor_name, u.name AS employee_name
+    SELECT 
+      o.*, 
+      t.table_number, 
+      f.name AS floor_name, 
+      u.name AS employee_name,
+      c.name AS customer_name,
+      c.phone AS customer_phone,
+      p.payment_method,
+      p.payment_status
     FROM orders o
-    JOIN cafe_tables t ON o.table_id = t.id
-    JOIN floors f ON t.floor_id = f.id
-    JOIN users u ON o.employee_id = u.id
+    LEFT JOIN cafe_tables t ON o.table_id = t.id
+    LEFT JOIN floors f ON t.floor_id = f.id
+    LEFT JOIN users u ON o.employee_id = u.id
+    LEFT JOIN customers c ON o.customer_id = c.id
+    LEFT JOIN (
+      SELECT order_id, payment_method, payment_status
+      FROM payments
+      WHERE id IN (SELECT MAX(id) FROM payments GROUP BY order_id)
+    ) p ON p.order_id = o.id
     WHERE o.status LIKE ?
     ORDER BY o.created_at DESC
+  `,
+  LIST_ORDERS_PAGED: `
+    SELECT
+      o.*,
+      t.table_number,
+      f.name AS floor_name,
+      u.name AS employee_name,
+      c.name AS customer_name,
+      c.phone AS customer_phone,
+      p.payment_method,
+      p.payment_status
+    FROM orders o
+    LEFT JOIN cafe_tables t ON o.table_id = t.id
+    LEFT JOIN floors f ON t.floor_id = f.id
+    LEFT JOIN users u ON o.employee_id = u.id
+    LEFT JOIN customers c ON o.customer_id = c.id
+    LEFT JOIN (
+      SELECT order_id, payment_method, payment_status
+      FROM payments
+      WHERE id IN (SELECT MAX(id) FROM payments GROUP BY order_id)
+    ) p ON p.order_id = o.id
+    WHERE o.status LIKE ?
+    ORDER BY o.created_at DESC
+    LIMIT ? OFFSET ?
+  `,
+  COUNT_ORDERS: `
+    SELECT COUNT(*) AS total
+    FROM orders
+    WHERE status LIKE ?
   `,
   CREATE_ORDER: `
     INSERT INTO orders (order_number, table_id, customer_id, session_id, employee_id, coupon_id, subtotal, tax_amount, discount_amount, total_amount, status) 

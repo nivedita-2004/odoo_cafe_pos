@@ -1,0 +1,62 @@
+export const couponCodesData = [
+  {
+    id: 1,
+    code: 'WELCOME10',
+    discountType: 'percentage',
+    discountValue: 10,
+    status: 'Active',
+    redemptions: 18,
+  },
+  {
+    id: 2,
+    code: 'FLAT50',
+    discountType: 'fixed',
+    discountValue: 50,
+    status: 'Active',
+    redemptions: 11,
+  },
+  {
+    id: 3,
+    code: 'CAFE20',
+    discountType: 'percentage',
+    discountValue: 20,
+    status: 'Inactive',
+    redemptions: 7,
+  },
+]
+
+export const automatedPromotionsData = [
+  {
+    id: 101,
+    name: 'Buy 3 Cold Coffee',
+    appliesTo: 'Product',
+    target: 'Cold Coffee',
+    minimumQuantity: 3,
+    minimumOrderAmount: '',
+    discountType: 'percentage',
+    discountValue: 10,
+    status: 'Active',
+  },
+  {
+    id: 102,
+    name: 'Order Above 999',
+    appliesTo: 'Order',
+    target: 'Whole Order',
+    minimumQuantity: '',
+    minimumOrderAmount: 999,
+    discountType: 'fixed',
+    discountValue: 100,
+    status: 'Active',
+  },
+  {
+    id: 103,
+    name: 'Pizza Party',
+    appliesTo: 'Product',
+    target: 'Veg Pizza',
+    minimumQuantity: 2,
+    minimumOrderAmount: '',
+    discountType: 'fixed',
+    discountValue: 80,
+    status: 'Inactive',
+  },
+]

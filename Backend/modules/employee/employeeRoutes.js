@@ -7,17 +7,23 @@ const { authorize } = require("../../middleware/roleMiddleware");
 const {
   getActiveSession,
   getLastSession,
+  listPosTables,
+  getTableQRCode,
   openSession,
   closeSession,
   searchCustomers,
   createCustomer,
   updateCustomer,
   deleteCustomer,
+  previewOrderTotals,
+  applyEmployeeCoupon,
   createOrder,
   getOrder,
   updateOrder,
   updateOrderStatus,
   getUPIQrCode,
+  createEmployeeRazorpayOrder,
+  verifyEmployeeRazorpayPayment,
   payOrder,
   getReceiptPDF,
   listOrders,
@@ -34,6 +40,10 @@ router.get("/sessions/last", getLastSession);
 router.post("/sessions/open", openSession);
 router.post("/sessions/:id/close", closeSession);
 
+// POS floor/table data
+router.get("/tables", listPosTables);
+router.get("/tables/:token/qr", getTableQRCode);
+
 // Customers list/create/update/delete
 router.get("/customers", searchCustomers);
 router.post("/customers", createCustomer);
@@ -42,6 +52,8 @@ router.delete("/customers/:id", deleteCustomer);
 
 // POS Orders
 router.get("/orders", listOrders);
+router.post("/orders/preview", previewOrderTotals);
+router.post("/coupons/apply", applyEmployeeCoupon);
 router.post("/orders", createOrder);
 router.get("/orders/:id", getOrder);
 router.put("/orders/:id", updateOrder);
@@ -50,6 +62,8 @@ router.post("/orders/:id/send-to-kitchen", sendToKitchen);
 
 // Payment processing
 router.get("/orders/:id/upi-qr", getUPIQrCode);
+router.post("/orders/:id/razorpay-order", createEmployeeRazorpayOrder);
+router.post("/orders/:id/razorpay-verify", verifyEmployeeRazorpayPayment);
 router.post("/orders/:id/pay", payOrder);
 router.get("/orders/:id/receipt", getReceiptPDF);
 

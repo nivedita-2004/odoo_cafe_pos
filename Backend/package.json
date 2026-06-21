@@ -28,6 +28,7 @@
     "nodemailer": "^9.0.1",
     "pdfkit": "^0.19.1",
     "qrcode": "^1.5.4",
+    "razorpay": "^2.9.6",
     "socket.io": "^4.8.3",
     "xss-clean": "^0.1.4"
   },

@@ -6,13 +6,46 @@ const { pool } = require("../../config/db");
 const adminQueries = require("./adminQuery");
 const { hashPassword } = require("../../utils/passwordUtils");
 
+function getPagination(query) {
+  if (query.page === undefined && query.limit === undefined) return null;
+
+  const page = Math.max(parseInt(query.page, 10) || 1, 1);
+  const limit = Math.min(Math.max(parseInt(query.limit, 10) || 20, 1), 100);
+  return {
+    page,
+    limit,
+    offset: (page - 1) * limit
+  };
+}
+
+function paginationMeta(total, pagination) {
+  return {
+    page: pagination.page,
+    limit: pagination.limit,
+    total,
+    totalPages: Math.ceil(total / pagination.limit)
+  };
+}
+
 
 // User / Employee Management
 
 async function listEmployees(req, res, next) {
+  const pagination = getPagination(req.query);
   let connection;
   try {
     connection = await pool.getConnection();
+
+    if (pagination) {
+      const [employees] = await connection.query(adminQueries.LIST_EMPLOYEES_PAGED, [pagination.limit, pagination.offset]);
+      const [[countRow]] = await connection.query(adminQueries.COUNT_EMPLOYEES);
+      return res.status(200).json({
+        success: true,
+        employees,
+        pagination: paginationMeta(countRow.total, pagination)
+      });
+    }
+
     const [employees] = await connection.query(adminQueries.LIST_EMPLOYEES);
     res.status(200).json({ success: true, employees });
   } catch (error) {
@@ -97,7 +130,7 @@ async function listCategories(req, res, next) {
 }
 
 async function createCategory(req, res, next) {
-  const { name, color } = req.body;
+  const { name, color, is_active } = req.body;
   if (!name || !color) {
     return res.status(400).json({ success: false, message: "Name and Color are required" });
   }
@@ -105,7 +138,7 @@ async function createCategory(req, res, next) {
   let connection;
   try {
     connection = await pool.getConnection();
-    await connection.query(adminQueries.CREATE_CATEGORY, [name, color]);
+    await connection.query(adminQueries.CREATE_CATEGORY, [name, color, is_active === undefined ? 1 : is_active]);
     res.status(201).json({ success: true, message: "Category created successfully" });
   } catch (error) {
     next(error);
@@ -138,6 +171,12 @@ async function deleteCategory(req, res, next) {
     await connection.query(adminQueries.DELETE_CATEGORY, [id]);
     res.status(200).json({ success: true, message: "Category deleted successfully" });
   } catch (error) {
+    if (error.code === "ER_ROW_IS_REFERENCED_2") {
+      return res.status(409).json({
+        success: false,
+        message: "Category is linked with products. Disable it instead of deleting."
+      });
+    }
     next(error);
   } finally {
     if (connection) connection.release();
@@ -147,11 +186,33 @@ async function deleteCategory(req, res, next) {
 
 // Product Management
 
+async function ensureProductImageColumn(connection) {
+  try {
+    await connection.query(adminQueries.ENSURE_PRODUCT_IMAGE_COLUMN);
+  } catch (error) {
+    if (error.code !== "ER_DUP_FIELDNAME") {
+      throw error;
+    }
+  }
+}
 
 async function listProducts(req, res, next) {
+  const pagination = getPagination(req.query);
   let connection;
   try {
     connection = await pool.getConnection();
+    await ensureProductImageColumn(connection);
+
+    if (pagination) {
+      const [products] = await connection.query(adminQueries.LIST_PRODUCTS_PAGED, [pagination.limit, pagination.offset]);
+      const [[countRow]] = await connection.query(adminQueries.COUNT_PRODUCTS);
+      return res.status(200).json({
+        success: true,
+        products,
+        pagination: paginationMeta(countRow.total, pagination)
+      });
+    }
+
     const [products] = await connection.query(adminQueries.LIST_PRODUCTS);
     res.status(200).json({ success: true, products });
   } catch (error) {
@@ -162,7 +223,8 @@ async function listProducts(req, res, next) {
 }
 
 async function createProduct(req, res, next) {
-  const { name, description, price, unit, tax_percentage, category_id, category_name, category_color } = req.body;
+  const { name, description, price, unit, tax_percentage, is_active, category_id, category_name, category_color } = req.body;
+  const imageUrl = req.file ? `/uploads/${req.file.filename}` : req.body.image_url || null;
   if (!name || price === undefined) {
     return res.status(400).json({ success: false, message: "Name and Price are required" });
   }
@@ -170,6 +232,7 @@ async function createProduct(req, res, next) {
   let connection;
   try {
     connection = await pool.getConnection();
+    await ensureProductImageColumn(connection);
     await connection.beginTransaction();
 
     let targetCategoryId = category_id;
@@ -180,7 +243,7 @@ async function createProduct(req, res, next) {
       if (existing.length > 0) {
         targetCategoryId = existing[0].id;
       } else {
-        const [catResult] = await connection.query(adminQueries.CREATE_CATEGORY, [category_name, category_color]);
+        const [catResult] = await connection.query(adminQueries.CREATE_CATEGORY, [category_name, category_color, 1]);
         targetCategoryId = catResult.insertId;
       }
     }
@@ -196,7 +259,9 @@ async function createProduct(req, res, next) {
       description || "",
       price,
       unit || "PIECE",
-      tax_percentage || 0
+      tax_percentage || 0,
+      is_active === undefined ? 1 : is_active,
+      imageUrl
     ]);
 
     await connection.commit();
@@ -212,10 +277,12 @@ async function createProduct(req, res, next) {
 async function updateProduct(req, res, next) {
   const { id } = req.params;
   const { name, description, price, unit, tax_percentage, is_active, category_id, category_name, category_color } = req.body;
+  const uploadedImageUrl = req.file ? `/uploads/${req.file.filename}` : null;
 
   let connection;
   try {
     connection = await pool.getConnection();
+    await ensureProductImageColumn(connection);
     await connection.beginTransaction();
 
     let targetCategoryId = category_id;
@@ -226,18 +293,21 @@ async function updateProduct(req, res, next) {
       if (existing.length > 0) {
         targetCategoryId = existing[0].id;
       } else {
-        const [catResult] = await connection.query(adminQueries.CREATE_CATEGORY, [category_name, category_color]);
+        const [catResult] = await connection.query(adminQueries.CREATE_CATEGORY, [category_name, category_color, 1]);
         targetCategoryId = catResult.insertId;
       }
     }
 
     // Retrieve original product to keep category if not provided
     if (!targetCategoryId) {
-      const [orig] = await connection.query("SELECT category_id FROM products WHERE id = ?", [id]);
+      const [orig] = await connection.query("SELECT category_id, image_url FROM products WHERE id = ?", [id]);
       if (orig.length > 0) {
         targetCategoryId = orig[0].category_id;
       }
     }
+
+    const [originalProduct] = await connection.query("SELECT image_url FROM products WHERE id = ?", [id]);
+    const imageUrl = uploadedImageUrl || req.body.image_url || originalProduct[0]?.image_url || null;
 
     await connection.query(adminQueries.UPDATE_PRODUCT, [
       targetCategoryId,
@@ -247,6 +317,7 @@ async function updateProduct(req, res, next) {
       unit || "PIECE",
       tax_percentage || 0,
       is_active === undefined ? 1 : is_active,
+      imageUrl,
       id
     ]);
 
@@ -277,6 +348,15 @@ async function deleteProduct(req, res, next) {
 
 // Floor & Table Plan Management
 
+async function ensureTablePosStatusColumn(connection) {
+  try {
+    await connection.query(adminQueries.ENSURE_TABLE_POS_STATUS_COLUMN);
+  } catch (error) {
+    if (error.code !== "ER_DUP_FIELDNAME") {
+      throw error;
+    }
+  }
+}
 
 async function listFloors(req, res, next) {
   let connection;
@@ -330,6 +410,12 @@ async function deleteFloor(req, res, next) {
     await connection.query(adminQueries.DELETE_FLOOR, [id]);
     res.status(200).json({ success: true, message: "Floor deleted successfully" });
   } catch (error) {
+    if (error.code === "ER_ROW_IS_REFERENCED_2") {
+      return res.status(409).json({
+        success: false,
+        message: "Floor has linked tables or orders. Delete or disable linked tables first."
+      });
+    }
     next(error);
   } finally {
     if (connection) connection.release();
@@ -340,6 +426,7 @@ async function listTables(req, res, next) {
   let connection;
   try {
     connection = await pool.getConnection();
+    await ensureTablePosStatusColumn(connection);
     const [tables] = await connection.query(adminQueries.LIST_TABLES);
     res.status(200).json({ success: true, tables });
   } catch (error) {
@@ -350,7 +437,7 @@ async function listTables(req, res, next) {
 }
 
 async function createTable(req, res, next) {
-  const { floor_id, table_number, seats } = req.body;
+  const { floor_id, table_number, seats, is_active, pos_status } = req.body;
   if (!floor_id || !table_number || !seats) {
     return res.status(400).json({ success: false, message: "Missing required fields" });
   }
@@ -358,10 +445,12 @@ async function createTable(req, res, next) {
   let connection;
   try {
     connection = await pool.getConnection();
+    await ensureTablePosStatusColumn(connection);
     const uniqueToken = crypto.randomBytes(16).toString("hex");
-    const isActive = 1;
+    const isActive = is_active === undefined ? 1 : is_active;
+    const posStatus = pos_status || "available";
 
-    await connection.query(adminQueries.CREATE_TABLE, [floor_id, table_number, seats, uniqueToken, isActive]);
+    await connection.query(adminQueries.CREATE_TABLE, [floor_id, table_number, seats, uniqueToken, isActive, posStatus]);
     res.status(201).json({ success: true, message: "Table added successfully", token: uniqueToken });
   } catch (error) {
     next(error);
@@ -372,12 +461,20 @@ async function createTable(req, res, next) {
 
 async function updateTable(req, res, next) {
   const { id } = req.params;
-  const { floor_id, table_number, seats, is_active } = req.body;
+  const { floor_id, table_number, seats, is_active, pos_status } = req.body;
 
   let connection;
   try {
     connection = await pool.getConnection();
-    await connection.query(adminQueries.UPDATE_TABLE, [floor_id, table_number, seats, is_active === undefined ? 1 : is_active, id]);
+    await ensureTablePosStatusColumn(connection);
+    await connection.query(adminQueries.UPDATE_TABLE, [
+      floor_id,
+      table_number,
+      seats,
+      is_active === undefined ? 1 : is_active,
+      pos_status || "available",
+      id
+    ]);
     res.status(200).json({ success: true, message: "Table updated successfully" });
   } catch (error) {
     next(error);
@@ -394,6 +491,12 @@ async function deleteTable(req, res, next) {
     await connection.query(adminQueries.DELETE_TABLE, [id]);
     res.status(200).json({ success: true, message: "Table deleted successfully" });
   } catch (error) {
+    if (error.code === "ER_ROW_IS_REFERENCED_2") {
+      return res.status(409).json({
+        success: false,
+        message: "Table is linked with orders. Disable it instead of deleting."
+      });
+    }
     next(error);
   } finally {
     if (connection) connection.release();
@@ -435,7 +538,24 @@ async function updatePaymentMethod(req, res, next) {
   let connection;
   try {
     connection = await pool.getConnection();
-    await connection.query(adminQueries.UPDATE_PAYMENT_METHOD, [is_enabled === undefined ? 1 : is_enabled, upi_id || null, id]);
+
+    const [methods] = await connection.query(adminQueries.GET_PAYMENT_METHOD_BY_ID, [id]);
+    if (methods.length === 0) {
+      return res.status(404).json({ success: false, message: "Payment method not found" });
+    }
+
+    const method = methods[0];
+    const nextEnabled = is_enabled === undefined ? method.is_enabled : is_enabled;
+    const nextUpiId = upi_id === undefined ? method.upi_id : upi_id || null;
+
+    if (String(method.name).toUpperCase() === "UPI" && Number(nextEnabled) === 1 && !nextUpiId) {
+      return res.status(400).json({
+        success: false,
+        message: "UPI ID is required before enabling UPI QR payment"
+      });
+    }
+
+    await connection.query(adminQueries.UPDATE_PAYMENT_METHOD, [nextEnabled, nextUpiId, id]);
     res.status(200).json({ success: true, message: "Payment method updated successfully" });
   } catch (error) {
     next(error);
@@ -447,6 +567,16 @@ async function updatePaymentMethod(req, res, next) {
 // ==========================================
 // Coupon & Promotion Management
 // ==========================================
+
+async function ensurePromotionNameColumn(connection) {
+  try {
+    await connection.query(adminQueries.ENSURE_PROMOTION_NAME_COLUMN);
+  } catch (error) {
+    if (error.code !== "ER_DUP_FIELDNAME") {
+      throw error;
+    }
+  }
+}
 
 async function listCoupons(req, res, next) {
   let connection;
@@ -462,7 +592,7 @@ async function listCoupons(req, res, next) {
 }
 
 async function createCoupon(req, res, next) {
-  const { code, discount_type, discount_value, expiry_date } = req.body;
+  const { code, discount_type, discount_value, expiry_date, is_active } = req.body;
   if (!code || !discount_type || discount_value === undefined) {
     return res.status(400).json({ success: false, message: "Missing required fields" });
   }
@@ -470,7 +600,7 @@ async function createCoupon(req, res, next) {
   let connection;
   try {
     connection = await pool.getConnection();
-    await connection.query(adminQueries.CREATE_COUPON, [code, discount_type, discount_value, expiry_date || null, 1]);
+    await connection.query(adminQueries.CREATE_COUPON, [code, discount_type, discount_value, expiry_date || null, is_active === undefined ? 1 : is_active]);
     res.status(201).json({ success: true, message: "Coupon created successfully" });
   } catch (error) {
     next(error);
@@ -520,6 +650,7 @@ async function listPromotions(req, res, next) {
   let connection;
   try {
     connection = await pool.getConnection();
+    await ensurePromotionNameColumn(connection);
     const [promotions] = await connection.query(adminQueries.LIST_PROMOTIONS);
     res.status(200).json({ success: true, promotions });
   } catch (error) {
@@ -530,7 +661,7 @@ async function listPromotions(req, res, next) {
 }
 
 async function createPromotion(req, res, next) {
-  const { promotion_type, product_id, min_quantity, min_order_amount, discount_type, discount_value } = req.body;
+  const { name, promotion_type, product_id, min_quantity, min_order_amount, discount_type, discount_value, is_active } = req.body;
   if (!promotion_type || !discount_type || discount_value === undefined) {
     return res.status(400).json({ success: false, message: "Missing required fields" });
   }
@@ -538,14 +669,16 @@ async function createPromotion(req, res, next) {
   let connection;
   try {
     connection = await pool.getConnection();
+    await ensurePromotionNameColumn(connection);
     await connection.query(adminQueries.CREATE_PROMOTION, [
+      name || `${promotion_type} Promotion`,
       promotion_type,
       product_id || null,
       min_quantity || null,
       min_order_amount || null,
       discount_type,
       discount_value,
-      1
+      is_active === undefined ? 1 : is_active
     ]);
     res.status(201).json({ success: true, message: "Promotion created successfully" });
   } catch (error) {
@@ -557,12 +690,14 @@ async function createPromotion(req, res, next) {
 
 async function updatePromotion(req, res, next) {
   const { id } = req.params;
-  const { promotion_type, product_id, min_quantity, min_order_amount, discount_type, discount_value, is_active } = req.body;
+  const { name, promotion_type, product_id, min_quantity, min_order_amount, discount_type, discount_value, is_active } = req.body;
 
   let connection;
   try {
     connection = await pool.getConnection();
+    await ensurePromotionNameColumn(connection);
     await connection.query(adminQueries.UPDATE_PROMOTION, [
+      name || `${promotion_type} Promotion`,
       promotion_type,
       product_id || null,
       min_quantity || null,
@@ -707,6 +842,40 @@ async function getSalesReports(req, res, next) {
       ORDER BY total_revenue DESC
     `;
 
+    const byCategorySql = `
+      SELECT 
+        c.id AS category_id,
+        c.name AS category_name,
+        SUM(oi.quantity) AS total_quantity,
+        SUM(oi.line_total) AS total_revenue
+      FROM order_items oi
+      JOIN products p ON oi.product_id = p.id
+      JOIN categories c ON p.category_id = c.id
+      JOIN orders o ON oi.order_id = o.id
+      ${orderFilter.where}
+      GROUP BY c.id, c.name
+      ORDER BY total_revenue DESC
+    `;
+
+    const topOrdersSql = `
+      SELECT
+        o.id AS order_id,
+        o.order_number,
+        o.total_amount,
+        o.status,
+        o.created_at,
+        t.table_number,
+        c.name AS customer_name,
+        u.name AS employee_name
+      FROM orders o
+      LEFT JOIN cafe_tables t ON o.table_id = t.id
+      LEFT JOIN customers c ON o.customer_id = c.id
+      LEFT JOIN users u ON o.employee_id = u.id
+      ${orderFilter.where}
+      ORDER BY o.total_amount DESC
+      LIMIT 8
+    `;
+
     const sessionsSql = `
       SELECT s.*, u.name AS employee_name
       FROM pos_sessions s
@@ -718,6 +887,8 @@ async function getSalesReports(req, res, next) {
     const [[summary]] = await connection.query(summarySql, orderFilter.params);
     const [byDate] = await connection.query(byDateSql, orderFilter.params);
     const [byProduct] = await connection.query(byProductSql, orderFilter.params);
+    const [byCategory] = await connection.query(byCategorySql, orderFilter.params);
+    const [topOrders] = await connection.query(topOrdersSql, orderFilter.params);
     const [sessions] = await connection.query(sessionsSql, sessionFilter.params);
 
     res.status(200).json({
@@ -726,6 +897,8 @@ async function getSalesReports(req, res, next) {
         summary,
         byDate,
         byProduct,
+        byCategory,
+        topOrders,
         sessions
       }
     });
@@ -1089,6 +1262,19 @@ async function uploadBackgroundImage(req, res) {
   });
 }
 
+async function listPosSessions(req, res, next) {
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    const [sessions] = await connection.query(adminQueries.LIST_POS_SESSIONS);
+    res.status(200).json({ success: true, sessions });
+  } catch (error) {
+    next(error);
+  } finally {
+    if (connection) connection.release();
+  }
+}
+
 module.exports = {
   // User/Employees
   listEmployees,
@@ -1144,6 +1330,7 @@ module.exports = {
   getSettings,
   updateSettings,
   uploadBackgroundImage,
+  listPosSessions,
 
   // Employee Password / Archiving
   changeEmployeePassword,

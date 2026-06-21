@@ -7,11 +7,19 @@ async function listKitchenOrders(req, res, next) {
   try {
     connection = await pool.getConnection();
     const [orders] = await connection.query(kdsQueries.GET_ACTIVE_KITCHEN_ORDERS);
-    
-    // Fetch items for each active order
-    for (const order of orders) {
-      const [items] = await connection.query(kdsQueries.GET_ORDER_ITEMS_WITH_PRODUCT, [order.id]);
-      order.items = items;
+
+    if (orders.length > 0) {
+      const orderIds = orders.map((order) => order.id);
+      const [items] = await connection.query(kdsQueries.GET_ITEMS_FOR_ORDERS, [orderIds]);
+      const itemsByOrder = items.reduce((result, item) => {
+        if (!result[item.order_id]) result[item.order_id] = [];
+        result[item.order_id].push(item);
+        return result;
+      }, {});
+
+      orders.forEach((order) => {
+        order.items = itemsByOrder[order.id] || [];
+      });
     }
 
     res.status(200).json({ success: true, orders });
@@ -71,6 +79,7 @@ async function startKitchenOrder(req, res, next) {
 
     // Emit Socket updates
     socketService.notifyOrderStatusToPOS({ orderId: parseInt(id), status: "PREPARING" });
+    socketService.notifyOrderUpdatedToKitchen({ orderId: parseInt(id), status: "PREPARING" });
 
     res.status(200).json({ success: true, message: "Order preparation started" });
   } catch (error) {
@@ -110,6 +119,7 @@ async function completeKitchenOrder(req, res, next) {
 
     // Emit Socket updates
     socketService.notifyOrderStatusToPOS({ orderId: parseInt(id), status: "COMPLETED" });
+    socketService.notifyOrderUpdatedToKitchen({ orderId: parseInt(id), status: "COMPLETED" });
 
     res.status(200).json({ success: true, message: "Order preparation completed" });
   } catch (error) {
@@ -154,6 +164,9 @@ async function completeKitchenItem(req, res, next) {
     socketService.notifyItemStatusToPOS({ itemId: parseInt(id), status: "COMPLETED" });
     if (allCompleted) {
       socketService.notifyOrderStatusToPOS({ orderId: order.id, status: "COMPLETED" });
+      socketService.notifyOrderUpdatedToKitchen({ orderId: order.id, status: "COMPLETED" });
+    } else {
+      socketService.notifyOrderUpdatedToKitchen({ orderId: order.id, itemId: parseInt(id), status: "COMPLETED" });
     }
 
     res.status(200).json({
