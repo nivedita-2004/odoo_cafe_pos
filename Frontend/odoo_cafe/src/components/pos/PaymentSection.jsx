@@ -87,6 +87,7 @@ const PaymentSection = () => {
     setPaymentMethod,
     completePayment,
     completeVerifiedOnlinePayment,
+    cancelCurrentDraftOrder,
     persistCurrentOrder,
     setToast,
   } = usePOS()
@@ -100,6 +101,10 @@ const PaymentSection = () => {
   const cashEnabled = enabledMethods.some((method) => (methodPaymentKeys[method.id] || method.id) === 'cash')
   const fallbackMethod = enabledMethods[0] ? methodPaymentKeys[enabledMethods[0].id] || enabledMethods[0].id : ''
   const changeDue = Number(received || 0) - totals.total
+
+  useEffect(() => {
+    setReceived(totals.total ? String(totals.total) : '')
+  }, [totals.total])
 
   useEffect(() => {
     const loadPaymentMethods = async () => {
@@ -141,6 +146,8 @@ const PaymentSection = () => {
   }
 
   const handleOnlinePayment = async (method) => {
+    let createdOrderId = null
+
     try {
       setIsOnlinePaying(true)
       const isLoaded = await loadRazorpayScript()
@@ -148,10 +155,10 @@ const PaymentSection = () => {
         throw new Error('Unable to load Razorpay checkout.')
       }
 
-      const orderId = await persistCurrentOrder()
-      if (!orderId) return
+      createdOrderId = await persistCurrentOrder()
+      if (!createdOrderId) return
 
-      const orderResponse = await createEmployeeRazorpayOrder(orderId)
+      const orderResponse = await createEmployeeRazorpayOrder(createdOrderId)
       const razorpayOrder = orderResponse.data
       const paymentMethodConfig =
         method === 'upi'
@@ -185,6 +192,10 @@ const PaymentSection = () => {
 
       await completeVerifiedOnlinePayment(method, paymentResult)
     } catch (error) {
+      if (createdOrderId) {
+        await cancelCurrentDraftOrder(createdOrderId)
+      }
+
       setToast({
         message: error.response?.data?.message || error.message || 'Unable to complete online payment',
         type: 'error',

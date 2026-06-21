@@ -1,5 +1,4 @@
-import { useEffect, useState } from 'react'
-import { useOutletContext } from 'react-router-dom'
+import { useState } from 'react'
 import CartSection from '../../components/pos/CartSection'
 import CustomerModal from '../../components/pos/CustomerModal'
 import DiscountPopup from '../../components/pos/DiscountPopup'
@@ -11,15 +10,10 @@ import { usePOS } from '../../context/POSContext.jsx'
 const tabs = ['Products', 'Cart', 'Payment']
 
 const POSPage = () => {
-  const { openFloorPopup } = useOutletContext()
   const { lastReceipt, setLastReceipt } = usePOS()
   const [activeTab, setActiveTab] = useState('Products')
   const [couponOpen, setCouponOpen] = useState(false)
   const [customerOpen, setCustomerOpen] = useState(false)
-
-  useEffect(() => {
-    openFloorPopup()
-  }, [openFloorPopup])
 
   return (
     <main className="p-3 sm:p-4">

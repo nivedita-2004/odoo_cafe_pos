@@ -12,7 +12,6 @@ import {
   openEmployeeSession,
   payEmployeeOrder,
   previewEmployeeOrderTotals,
-  sendEmployeeOrderToKitchen,
   updateEmployeeCustomer,
   updateEmployeeOrder,
   updateEmployeeOrderStatus,
@@ -23,8 +22,38 @@ import { calculateTotal } from '../utils/cartCalculations'
 import { tableKey } from '../utils/orderHelpers'
 
 const POSContext = createContext(null)
+const POS_DRAFT_STORAGE_KEY = 'odoo-cafe-pos-active-draft'
 
 const toNumber = (value) => Number(value || 0)
+
+const readSavedDraft = () => {
+  try {
+    const saved = window.localStorage.getItem(POS_DRAFT_STORAGE_KEY)
+    return saved ? JSON.parse(saved) : {}
+  } catch {
+    return {}
+  }
+}
+
+const writeSavedDraft = (draft) => {
+  try {
+    const hasDraft =
+      draft.selectedTable ||
+      draft.cartItems.length ||
+      draft.selectedCustomer ||
+      draft.appliedCoupon ||
+      draft.currentOrderId
+
+    if (!hasDraft) {
+      window.localStorage.removeItem(POS_DRAFT_STORAGE_KEY)
+      return
+    }
+
+    window.localStorage.setItem(POS_DRAFT_STORAGE_KEY, JSON.stringify(draft))
+  } catch {
+    // Local storage can be unavailable in private mode; POS should still work.
+  }
+}
 
 const statusToUi = (status) =>
   ({
@@ -74,19 +103,20 @@ const normalizeOrder = (order) => {
 
 export const POSProvider = ({ children }) => {
   const { user } = useAuth()
-  const [selectedTable, setSelectedTable] = useState(null)
-  const [cartItems, setCartItems] = useState([])
-  const [selectedCustomer, setSelectedCustomer] = useState(null)
-  const [appliedCoupon, setAppliedCoupon] = useState(null)
+  const savedDraft = useMemo(() => readSavedDraft(), [])
+  const [selectedTable, setSelectedTable] = useState(savedDraft.selectedTable || null)
+  const [cartItems, setCartItems] = useState(savedDraft.cartItems || [])
+  const [selectedCustomer, setSelectedCustomer] = useState(savedDraft.selectedCustomer || null)
+  const [appliedCoupon, setAppliedCoupon] = useState(savedDraft.appliedCoupon || null)
   const [orders, setOrders] = useState([])
   const [sessionStart] = useState(() => Date.now())
   const [customers, setCustomers] = useState([])
-  const [paymentMethod, setPaymentMethod] = useState('cash')
+  const [paymentMethod, setPaymentMethod] = useState(savedDraft.paymentMethod || 'cash')
   const [kitchenOrders, setKitchenOrders] = useState([])
   const [toast, setToast] = useState(null)
   const [lastReceipt, setLastReceipt] = useState(null)
   const [activeSession, setActiveSession] = useState(null)
-  const [currentOrderId, setCurrentOrderId] = useState(null)
+  const [currentOrderId, setCurrentOrderId] = useState(savedDraft.currentOrderId || null)
   const [previewTotals, setPreviewTotals] = useState(null)
 
   const employee = useMemo(
@@ -173,13 +203,31 @@ export const POSProvider = ({ children }) => {
     return () => window.clearTimeout(timer)
   }, [cartItems, appliedCoupon])
 
+  useEffect(() => {
+    writeSavedDraft({
+      selectedTable,
+      cartItems,
+      selectedCustomer,
+      appliedCoupon,
+      paymentMethod,
+      currentOrderId,
+    })
+  }, [appliedCoupon, cartItems, currentOrderId, paymentMethod, selectedCustomer, selectedTable])
+
   const selectTable = (table) => {
+    if (selectedTable && tableKey(selectedTable) === tableKey(table)) {
+      setSelectedTable(null)
+      setCurrentOrderId(null)
+      return
+    }
+
     setSelectedTable(table)
     const draftForTable = orders.find(
       (order) => order.status === 'Draft' && tableKey(order.table) === tableKey(table),
     )
 
     if (draftForTable) {
+      setCurrentOrderId(draftForTable.backendId)
       setCartItems(draftForTable.items)
       setSelectedCustomer(draftForTable.customer || null)
       setAppliedCoupon(draftForTable.coupon || null)
@@ -332,35 +380,31 @@ export const POSProvider = ({ children }) => {
   }
 
   const createDraftOrder = async () => {
-    try {
-      const orderId = await persistCurrentOrder()
-      if (!orderId) return null
-      await loadOrders()
-      showToast('Draft order saved')
-      return orderId
-    } catch (error) {
-      showToast(error.response?.data?.message || 'Unable to save draft order', 'error')
-      return null
-    }
+    showToast('Complete payment to create the order', 'error')
+    return null
   }
 
   const sendToKitchen = async () => {
+    showToast('Complete payment to create the order', 'error')
+  }
+
+  const cancelCurrentDraftOrder = async (orderId = currentOrderId) => {
+    if (!orderId) return
+
     try {
-      const orderId = await persistCurrentOrder()
-      if (!orderId) return
-      const response = await sendEmployeeOrderToKitchen(orderId)
-      setKitchenOrders((current) => [normalizeOrder(response.data.order), ...current])
+      await updateEmployeeOrderStatus(orderId, 'CANCELLED')
       await loadOrders()
-      showToast('Order sent to kitchen')
-      clearCart()
-    } catch (error) {
-      showToast(error.response?.data?.message || 'Unable to send order to kitchen', 'error')
+      setCurrentOrderId(null)
+    } catch {
+      // Payment cancellation cleanup should not block the cashier flow.
     }
   }
 
   const completePayment = async (method, options = {}) => {
+    let orderId = null
+
     try {
-      const orderId = await persistCurrentOrder()
+      orderId = await persistCurrentOrder()
       if (!orderId) return null
 
       await payEmployeeOrder(orderId, {
@@ -380,14 +424,19 @@ export const POSProvider = ({ children }) => {
       clearCart()
       return paidOrder
     } catch (error) {
+      if (orderId) {
+        await cancelCurrentDraftOrder(orderId)
+      }
       showToast(error.response?.data?.message || 'Unable to complete payment', 'error')
       return null
     }
   }
 
   const completeVerifiedOnlinePayment = async (method, paymentResult) => {
+    let orderId = null
+
     try {
-      const orderId = await persistCurrentOrder()
+      orderId = await persistCurrentOrder()
       if (!orderId) return null
 
       await verifyEmployeeRazorpayPayment(orderId, {
@@ -407,6 +456,9 @@ export const POSProvider = ({ children }) => {
       clearCart()
       return paidOrder
     } catch (error) {
+      if (orderId) {
+        await cancelCurrentDraftOrder(orderId)
+      }
       showToast(error.response?.data?.message || 'Unable to complete payment', 'error')
       return null
     }
@@ -475,6 +527,7 @@ export const POSProvider = ({ children }) => {
     sendToKitchen,
     completePayment,
     completeVerifiedOnlinePayment,
+    cancelCurrentDraftOrder,
     createDraftOrder,
     editOrder,
     deleteOrder,

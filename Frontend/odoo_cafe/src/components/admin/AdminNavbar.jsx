@@ -65,13 +65,13 @@ const AdminNavbar = ({ onMenuClick }) => {
 
         {/* Right section */}
         <div className="flex shrink-0 items-center gap-2">
-          <button
+          {/* <button
             type="button"
             className="hidden h-10 w-10 items-center justify-center text-gray-800 inline-flex"
             aria-label="Notifications"
           >
             <Bell className="h-6 w-6" />
-          </button>
+          </button> */}
 
           <div className="flex h-10 items-center gap-2 rounded-xl bg-white px-2.5 border border-slate-200">
             <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-[#fff3e8] text-[#9a5a2e]">

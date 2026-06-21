@@ -7,6 +7,12 @@ const crypto = require("crypto");
 const QRCode = require("qrcode");
 const { getRazorpayClient } = require("../../config/razorpay");
 
+const SELF_ORDERING_ORDER_MODES = new Set([
+  "ONLINE_ORDERING",
+  "TABLE_ORDERING",
+  "QR_ORDERING",
+  "QR_MENU"
+]);
 
 async function getCustomerMenu(req, res, next) {
   let connection;
@@ -62,7 +68,7 @@ async function getTableDetails(req, res, next) {
 
     const settings = {
       self_ordering_enabled: rows[0]?.key_value === "1",
-      self_ordering_mode: modeRows[0]?.key_value || "QR_MENU",
+      self_ordering_mode: modeRows[0]?.key_value || "ONLINE_ORDERING",
       background_color: colorRows[0]?.key_value || "#FFFFFF",
       background_image: bgImageRows[0]?.key_value || ""
     };
@@ -100,7 +106,8 @@ async function placeSelfOrder(req, res, next) {
     }
 
     const [modeRow] = await connection.query(customerQueries.GET_SYSTEM_SETTING, ["self_ordering_mode"]);
-    if (!modeRow[0] || modeRow[0].key_value !== "ONLINE_ORDERING") {
+    const selfOrderingMode = modeRow[0]?.key_value || "ONLINE_ORDERING";
+    if (!SELF_ORDERING_ORDER_MODES.has(selfOrderingMode)) {
       await connection.rollback();
       return res.status(403).json({ success: false, message: "Self-Ordering is in Menu-Only mode. Please order via cashier." });
     }
