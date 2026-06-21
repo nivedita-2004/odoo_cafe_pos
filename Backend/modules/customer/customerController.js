@@ -157,6 +157,7 @@ async function placeSelfOrder(req, res, next) {
 
     // 8. Notify kitchen display KDS in real time via Socket.io
     socketService.notifyNewOrderToKitchen({ orderId, status: "TO_COOK" });
+    socketService.notifyPOSSessionUpdated({ sessionId: session.id, orderId, action: "ORDER_CREATED" });
 
     res.status(201).json({
       success: true,
@@ -332,6 +333,7 @@ async function verifyCustomerRazorpayPayment(req, res, next) {
   const { id } = req.params;
   const {
     table_token,
+    payment_method,
     razorpay_order_id,
     razorpay_payment_id,
     razorpay_signature
@@ -380,12 +382,15 @@ async function verifyCustomerRazorpayPayment(req, res, next) {
 
     await connection.query(employeeQueries.RECORD_PAYMENT, [
       id,
-      "RAZORPAY",
+      ["CARD", "UPI"].includes(String(payment_method).toUpperCase())
+        ? String(payment_method).toUpperCase()
+        : "CARD",
       razorpay_payment_id,
       order.total_amount
     ]);
 
     await connection.commit();
+    socketService.notifyPOSSessionUpdated({ sessionId: order.session_id, orderId: Number(id), action: "PAYMENT_SUCCESS" });
 
     res.status(200).json({
       success: true,

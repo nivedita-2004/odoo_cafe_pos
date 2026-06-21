@@ -23,6 +23,7 @@ const once = (key, request) => {
 }
 
 export const getCustomerMenu = () => once('menu', () => axiosClient.get('/customer/menu'))
+export const getEmployeePaymentMethods = () => axiosClient.get('/employee/payment-methods')
 
 export const getActiveEmployeeSession = () =>
   once('session', () => axiosClient.get('/employee/sessions/active'))

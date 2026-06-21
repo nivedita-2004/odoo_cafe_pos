@@ -16,8 +16,8 @@ function initSocketHandlers(io) {
     orderSocket(io, socket);
     kitchenSocket(io, socket);
 
-    socket.on("disconnect", () => {
-      console.log(`[SOCKET] Client disconnected: ${socket.id}`);
+    socket.on("disconnect", (reason) => {
+      console.log(`[SOCKET] Client disconnected: ${socket.id}, reason: ${reason}`);
     });
   });
 }

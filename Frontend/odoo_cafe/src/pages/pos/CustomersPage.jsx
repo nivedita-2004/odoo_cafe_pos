@@ -1,5 +1,5 @@
 import { Edit, Loader2, Search, Trash2, UserCheck, X } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useGlobalSearch } from '../../context/GlobalSearchContext.jsx'
 import { usePOS } from '../../context/POSContext.jsx'
 
@@ -57,12 +57,15 @@ const Modal = ({ title, children, onClose, size = 'max-w-3xl' }) => (
   </div>
 )
 
+const customersPerPage = 9
+
 const CustomersPage = () => {
   const { customers, selectedCustomer, selectCustomer, upsertCustomer, deleteCustomer } = usePOS()
   const { searchQuery } = useGlobalSearch()
   const [search, setSearch] = useState('')
   const [editing, setEditing] = useState(null)
   const [form, setForm] = useState(blankForm)
+  const [currentPage, setCurrentPage] = useState(1)
 
   const filteredCustomers = useMemo(
     () => {
@@ -74,6 +77,21 @@ const CustomersPage = () => {
     },
     [customers, search, searchQuery],
   )
+
+  const totalPages = Math.max(1, Math.ceil(filteredCustomers.length / customersPerPage))
+  const safeCurrentPage = Math.min(currentPage, totalPages)
+  const paginatedCustomers = filteredCustomers.slice(
+    (safeCurrentPage - 1) * customersPerPage,
+    safeCurrentPage * customersPerPage,
+  )
+
+  const goToPage = (page) => {
+    setCurrentPage(Math.min(Math.max(page, 1), totalPages))
+  }
+
+  useEffect(() => {
+    setCurrentPage(1)
+  }, [search, searchQuery])
 
   const openForm = (customer = null) => {
     setEditing(customer)
@@ -115,7 +133,7 @@ const CustomersPage = () => {
           <EmptyState title="No customers found" description="Create a customer to attach them with POS orders." icon={Search} />
         ) : (
           <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-            {filteredCustomers.map((customer) => (
+            {paginatedCustomers.map((customer) => (
               <div key={customer.id} className="rounded-2xl bg-[#FFF8F0] p-4 ring-1 ring-[#E7D8C9]">
                 <div className="flex items-start justify-between gap-3">
                   <div>
@@ -142,6 +160,47 @@ const CustomersPage = () => {
             ))}
           </div>
         )}
+
+        {filteredCustomers.length ? (
+          <div className="mt-5 flex flex-col gap-3 border-t border-[#F5E6D3] pt-4 sm:flex-row sm:items-center sm:justify-between">
+            <p className="text-sm font-bold text-[#2D1B0E]/55">
+              Showing {(safeCurrentPage - 1) * customersPerPage + 1}-
+              {Math.min(safeCurrentPage * customersPerPage, filteredCustomers.length)} of {filteredCustomers.length}
+            </p>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => goToPage(safeCurrentPage - 1)}
+                disabled={safeCurrentPage === 1}
+                className="rounded-xl border border-[#E7D8C9] px-3 py-2 text-xs font-black text-[#8B4513] disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                Prev
+              </button>
+              {Array.from({ length: totalPages }, (_, index) => index + 1).map((page) => (
+                <button
+                  key={page}
+                  type="button"
+                  onClick={() => goToPage(page)}
+                  className={`h-9 min-w-9 rounded-xl px-3 text-xs font-black ${
+                    page === safeCurrentPage
+                      ? 'bg-[#8B4513] text-white'
+                      : 'border border-[#E7D8C9] text-[#8B4513] hover:bg-[#FFF8F0]'
+                  }`}
+                >
+                  {page}
+                </button>
+              ))}
+              <button
+                type="button"
+                onClick={() => goToPage(safeCurrentPage + 1)}
+                disabled={safeCurrentPage === totalPages}
+                className="rounded-xl border border-[#E7D8C9] px-3 py-2 text-xs font-black text-[#8B4513] disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                Next
+              </button>
+            </div>
+          </div>
+        ) : null}
       </section>
 
       {editing !== null ? (

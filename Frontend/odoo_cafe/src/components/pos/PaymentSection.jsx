@@ -1,7 +1,6 @@
 import { Banknote, CreditCard, Loader2, QrCode } from 'lucide-react'
-import { useState } from 'react'
-import { createEmployeeRazorpayOrder } from '../../api/employeePosApi'
-import { paymentMethods } from '../../data/paymentMethods'
+import { useEffect, useMemo, useState } from 'react'
+import { createEmployeeRazorpayOrder, getEmployeePaymentMethods } from '../../api/employeePosApi'
 import { usePOS } from '../../context/POSContext.jsx'
 import { formatCurrency } from '../../utils/formatCurrency'
 
@@ -51,6 +50,22 @@ const methodPaymentKeys = {
   card: 'card',
 }
 
+const getMethodKey = (methodName) => {
+  const name = String(methodName || '').toLowerCase()
+  if (name.includes('cash')) return 'cash'
+  if (name.includes('upi')) return 'upi-qr'
+  return 'digital-card'
+}
+
+const normalizePaymentMethod = (method) => {
+  const id = getMethodKey(method.name)
+  return {
+    id,
+    name: id === 'digital-card' ? 'Digital/Card' : id === 'upi-qr' ? 'UPI QR' : 'Cash',
+    enabled: Number(method.is_enabled) === 1,
+  }
+}
+
 const loadRazorpayScript = () =>
   new Promise((resolve) => {
     if (window.Razorpay) {
@@ -77,10 +92,47 @@ const PaymentSection = () => {
   } = usePOS()
   const [received, setReceived] = useState('')
   const [isOnlinePaying, setIsOnlinePaying] = useState(false)
-  const enabledMethods = paymentMethods.filter((method) => method.enabled)
+  const [paymentMethods, setPaymentMethods] = useState([])
+  const enabledMethods = useMemo(
+    () => paymentMethods.filter((method) => method.enabled),
+    [paymentMethods],
+  )
+  const cashEnabled = enabledMethods.some((method) => (methodPaymentKeys[method.id] || method.id) === 'cash')
+  const fallbackMethod = enabledMethods[0] ? methodPaymentKeys[enabledMethods[0].id] || enabledMethods[0].id : ''
   const changeDue = Number(received || 0) - totals.total
 
+  useEffect(() => {
+    const loadPaymentMethods = async () => {
+      try {
+        const response = await getEmployeePaymentMethods()
+        setPaymentMethods((response.data.paymentMethods || []).map(normalizePaymentMethod))
+      } catch (error) {
+        setToast({
+          message: error.response?.data?.message || 'Unable to load payment methods',
+          type: 'error',
+          id: Date.now(),
+        })
+      }
+    }
+
+    loadPaymentMethods()
+  }, [setToast])
+
+  useEffect(() => {
+    if (!enabledMethods.length) return
+    const isSelectedEnabled = enabledMethods.some((method) => (methodPaymentKeys[method.id] || method.id) === paymentMethod)
+    if (!isSelectedEnabled) {
+      const nextMethod = enabledMethods[0]
+      setPaymentMethod(methodPaymentKeys[nextMethod.id] || nextMethod.id)
+    }
+  }, [enabledMethods, paymentMethod, setPaymentMethod])
+
   const handleCash = () => {
+    if (!cashEnabled) {
+      setToast({ message: 'Cash payment is disabled by admin', type: 'error', id: Date.now() })
+      return
+    }
+
     if (Number(received || 0) < totals.total) {
       setToast({ message: 'Received amount is less than total', type: 'error', id: Date.now() })
       return
@@ -176,6 +228,12 @@ const PaymentSection = () => {
       </div>
 
       <div className="mt-4">
+        {!enabledMethods.length ? (
+          <div className="rounded-lg bg-red-50 p-4 text-center text-sm font-black text-red-700 ring-1 ring-red-100">
+            No payment method is enabled by admin.
+          </div>
+        ) : null}
+
         {paymentMethod === 'cash' ? (
           <div className="space-y-3">
             <input
@@ -200,7 +258,7 @@ const PaymentSection = () => {
             <Button onClick={() => handleOnlinePayment('upi')} isLoading={isOnlinePaying}>
               Pay with UPI
             </Button>
-            <Button variant="ghost" onClick={() => setPaymentMethod('cash')}>
+            <Button variant="ghost" onClick={() => setPaymentMethod(fallbackMethod)}>
               Cancel
             </Button>
           </div>

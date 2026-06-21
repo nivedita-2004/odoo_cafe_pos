@@ -1,5 +1,5 @@
 import { Edit, Eye, Search, Trash2 } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useGlobalSearch } from '../../context/GlobalSearchContext.jsx'
 import { usePOS } from '../../context/POSContext.jsx'
@@ -36,10 +36,13 @@ const EmptyState = ({ title, description, icon: Icon }) => (
   </div>
 )
 
+const ordersPerPage = 8
+
 const OrdersPage = () => {
   const { orders, editOrder, deleteOrder } = usePOS()
   const { searchQuery } = useGlobalSearch()
   const [search, setSearch] = useState('')
+  const [currentPage, setCurrentPage] = useState(1)
   const navigate = useNavigate()
 
   const filteredOrders = useMemo(() => {
@@ -51,6 +54,21 @@ const OrdersPage = () => {
         .includes(effectiveSearch),
     )
   }, [orders, search, searchQuery])
+
+  const totalPages = Math.max(1, Math.ceil(filteredOrders.length / ordersPerPage))
+  const safeCurrentPage = Math.min(currentPage, totalPages)
+  const paginatedOrders = filteredOrders.slice(
+    (safeCurrentPage - 1) * ordersPerPage,
+    safeCurrentPage * ordersPerPage,
+  )
+
+  const goToPage = (page) => {
+    setCurrentPage(Math.min(Math.max(page, 1), totalPages))
+  }
+
+  useEffect(() => {
+    setCurrentPage(1)
+  }, [search, searchQuery])
 
   const handleEdit = async (orderId) => {
     if (await editOrder(orderId)) navigate('/pos')
@@ -93,7 +111,7 @@ const OrdersPage = () => {
             <EmptyState title="No orders yet" description="Paid and draft orders will appear here." icon={Search} />
           ) : (
             <div className="space-y-3">
-              {filteredOrders.map((order) => (
+              {paginatedOrders.map((order) => (
                 <div
                   key={order.id}
                   className="group rounded-[24px] border border-[#E7D8C9] bg-white p-4 shadow-sm transition hover:-translate-y-0.5 hover:border-[#8B4513]/30 hover:shadow-[0_16px_40px_rgba(45,27,14,0.08)]"
@@ -166,6 +184,45 @@ const OrdersPage = () => {
                   </div>
                 </div>
               ))}
+
+              <div className="flex flex-col gap-3 pt-2 sm:flex-row sm:items-center sm:justify-between">
+                <p className="text-sm font-bold text-[#2D1B0E]/55">
+                  Showing {(safeCurrentPage - 1) * ordersPerPage + 1}-
+                  {Math.min(safeCurrentPage * ordersPerPage, filteredOrders.length)} of {filteredOrders.length}
+                </p>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => goToPage(safeCurrentPage - 1)}
+                    disabled={safeCurrentPage === 1}
+                    className="rounded-xl border border-[#E7D8C9] px-3 py-2 text-xs font-black text-[#8B4513] disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    Prev
+                  </button>
+                  {Array.from({ length: totalPages }, (_, index) => index + 1).map((page) => (
+                    <button
+                      key={page}
+                      type="button"
+                      onClick={() => goToPage(page)}
+                      className={`h-9 min-w-9 rounded-xl px-3 text-xs font-black ${
+                        page === safeCurrentPage
+                          ? 'bg-[#8B4513] text-white'
+                          : 'border border-[#E7D8C9] text-[#8B4513] hover:bg-[#FFF8F0]'
+                      }`}
+                    >
+                      {page}
+                    </button>
+                  ))}
+                  <button
+                    type="button"
+                    onClick={() => goToPage(safeCurrentPage + 1)}
+                    disabled={safeCurrentPage === totalPages}
+                    className="rounded-xl border border-[#E7D8C9] px-3 py-2 text-xs font-black text-[#8B4513] disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    Next
+                  </button>
+                </div>
+              </div>
             </div>
           )}
         </div>

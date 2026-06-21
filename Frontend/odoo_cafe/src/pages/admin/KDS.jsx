@@ -16,7 +16,7 @@ import {
   getKitchenOrders,
   startKitchenOrder,
 } from '../../api/kdsApi'
-import { createSocketClient } from '../../api/socketClient'
+import { joinSocketRoom } from '../../api/socketClient'
 import { useGlobalSearch } from '../../context/GlobalSearchContext.jsx'
 
 const statusStyles = {
@@ -32,6 +32,7 @@ const itemStatusStyles = {
 }
 
 const toNumber = (value) => Number(value || 0)
+const kdsOrdersPerPage = 6
 
 const formatTime = (value) =>
   value
@@ -92,6 +93,7 @@ const KDS = () => {
   const [isLoading, setIsLoading] = useState(true)
   const [isSavingId, setIsSavingId] = useState(null)
   const [error, setError] = useState('')
+  const [currentPage, setCurrentPage] = useState(1)
   const { searchQuery } = useGlobalSearch()
 
   const loadOrders = async (showLoader = true) => {
@@ -129,22 +131,19 @@ const KDS = () => {
   }, [])
 
   useEffect(() => {
-    const socket = createSocketClient()
+    const socket = joinSocketRoom('kitchen')
     const refreshKitchenOrders = () => {
       loadOrders(false)
     }
 
-    socket.on('connect', () => {
-      socket.emit('join', 'kitchen')
-    })
+    socket.off('kitchen:newOrder', refreshKitchenOrders)
+    socket.off('kitchen:orderUpdated', refreshKitchenOrders)
     socket.on('kitchen:newOrder', refreshKitchenOrders)
     socket.on('kitchen:orderUpdated', refreshKitchenOrders)
 
     return () => {
-      socket.off('connect')
       socket.off('kitchen:newOrder', refreshKitchenOrders)
       socket.off('kitchen:orderUpdated', refreshKitchenOrders)
-      socket.disconnect()
     }
   }, [])
 
@@ -193,6 +192,21 @@ const KDS = () => {
       })
       .filter((order) => statusFilter === 'All' || order.status === statusFilter)
   }, [orders, searchQuery, statusFilter])
+
+  const totalPages = Math.max(1, Math.ceil(filteredOrders.length / kdsOrdersPerPage))
+  const safeCurrentPage = Math.min(currentPage, totalPages)
+  const paginatedOrders = filteredOrders.slice(
+    (safeCurrentPage - 1) * kdsOrdersPerPage,
+    safeCurrentPage * kdsOrdersPerPage,
+  )
+
+  const goToPage = (page) => {
+    setCurrentPage(Math.min(Math.max(page, 1), totalPages))
+  }
+
+  useEffect(() => {
+    setCurrentPage(1)
+  }, [searchQuery, statusFilter])
 
   const runAction = async (id, action) => {
     try {
@@ -268,7 +282,7 @@ const KDS = () => {
         ) : null}
 
         <div className="mt-4 grid gap-4 lg:grid-cols-2 2xl:grid-cols-3">
-          {filteredOrders.map((order) => (
+          {paginatedOrders.map((order) => (
             <article key={order.id} className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm shadow-slate-200/50">
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
@@ -349,6 +363,47 @@ const KDS = () => {
             </article>
           ))}
         </div>
+
+        {!isLoading && filteredOrders.length > 0 ? (
+          <div className="mt-5 flex flex-col gap-3 border-t border-slate-100 pt-4 sm:flex-row sm:items-center sm:justify-between">
+            <p className="text-sm font-bold text-slate-500">
+              Showing {(safeCurrentPage - 1) * kdsOrdersPerPage + 1}-
+              {Math.min(safeCurrentPage * kdsOrdersPerPage, filteredOrders.length)} of {filteredOrders.length}
+            </p>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => goToPage(safeCurrentPage - 1)}
+                disabled={safeCurrentPage === 1}
+                className="rounded-lg border border-slate-200 px-3 py-2 text-xs font-black text-slate-600 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                Prev
+              </button>
+              {Array.from({ length: totalPages }, (_, index) => index + 1).map((page) => (
+                <button
+                  key={page}
+                  type="button"
+                  onClick={() => goToPage(page)}
+                  className={`h-9 min-w-9 rounded-lg px-3 text-xs font-black ${
+                    page === safeCurrentPage
+                      ? 'bg-[#c8793f] text-white'
+                      : 'border border-slate-200 text-slate-600 hover:bg-slate-50'
+                  }`}
+                >
+                  {page}
+                </button>
+              ))}
+              <button
+                type="button"
+                onClick={() => goToPage(safeCurrentPage + 1)}
+                disabled={safeCurrentPage === totalPages}
+                className="rounded-lg border border-slate-200 px-3 py-2 text-xs font-black text-slate-600 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                Next
+              </button>
+            </div>
+          </div>
+        ) : null}
       </section>
     </div>
   )

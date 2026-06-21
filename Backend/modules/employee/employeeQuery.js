@@ -15,9 +15,10 @@ module.exports = {
     WHERE id = ?
   `,
   GET_SESSION_TOTAL_SALES: `
-    SELECT COALESCE(SUM(total_amount), 0) AS total_sales 
-    FROM orders 
-    WHERE session_id = ? AND status = 'PAID'
+    SELECT COALESCE(SUM(p.amount), 0) AS total_sales
+    FROM orders o
+    JOIN payments p ON p.order_id = o.id
+    WHERE o.session_id = ? AND p.payment_status = 'SUCCESS'
   `,
   GET_LAST_SESSION: `
     SELECT opening_time, closing_amount, status 
@@ -191,6 +192,17 @@ module.exports = {
   GET_UPI_PAYMENT_METHOD: `
     SELECT * FROM payment_methods 
     WHERE name = 'UPI' AND is_enabled = 1 
+    LIMIT 1
+  `,
+  LIST_POS_PAYMENT_METHODS: `
+    SELECT id, name, is_enabled, upi_id
+    FROM payment_methods
+    ORDER BY id ASC
+  `,
+  GET_PAYMENT_METHOD_SETTING: `
+    SELECT *
+    FROM payment_methods
+    WHERE UPPER(name) LIKE ?
     LIMIT 1
   `
 };

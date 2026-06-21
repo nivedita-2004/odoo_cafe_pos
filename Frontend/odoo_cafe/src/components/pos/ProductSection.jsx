@@ -6,6 +6,14 @@ import { usePOS } from '../../context/POSContext.jsx'
 import CategoryTabs from './CategoryTabs'
 import ProductCard from './ProductCard'
 
+const apiRoot = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000/api').replace(/\/api\/?$/, '')
+
+const resolveImageUrl = (imageUrl = '') => {
+  if (!imageUrl) return ''
+  if (/^https?:\/\//i.test(imageUrl)) return imageUrl
+  return `${apiRoot}${imageUrl.startsWith('/') ? imageUrl : `/${imageUrl}`}`
+}
+
 const ProductSection = () => {
   const { addToCart } = usePOS()
   const { searchQuery } = useGlobalSearch()
@@ -30,6 +38,7 @@ const ProductSection = () => {
               price: Number(item.price || 0),
               tax: Number(item.tax_percentage || 0),
               color: category.category_color || '#c8793f',
+              image: resolveImageUrl(item.image_url),
             })),
           ),
         )
@@ -88,7 +97,7 @@ const ProductSection = () => {
           Loading products...
         </div>
       ) : null}
-      <div className="mt-3 grid gap-3 overflow-visible sm:grid-cols-2 lg:max-h-[calc(100vh-235px)] lg:overflow-auto lg:pr-1 xl:grid-cols-3 2xl:grid-cols-4">
+      <div className="mt-3 grid gap-3 no-scrollbar overflow-visible sm:grid-cols-2 lg:max-h-[calc(100vh-235px)] lg:overflow-auto lg:pr-1 xl:grid-cols-3 2xl:grid-cols-4">
         {filteredProducts.map((product) => (
           <ProductCard key={product.id} product={product} onAdd={addToCart} />
         ))}

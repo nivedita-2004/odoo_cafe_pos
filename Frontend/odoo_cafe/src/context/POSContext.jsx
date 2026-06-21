@@ -239,7 +239,18 @@ export const POSProvider = ({ children }) => {
         order_amount: fallbackTotals.total,
       })
       const coupon = response.data.coupon
+      setPreviewTotals(null)
       setAppliedCoupon(coupon)
+      if (cartItems.length) {
+        const totalsResponse = await previewEmployeeOrderTotals({
+          coupon_code: couponCode,
+          items: cartItems.map((item) => ({
+            product_id: item.id,
+            quantity: item.quantity,
+          })),
+        })
+        setPreviewTotals(totalsResponse.data.totals)
+      }
       showToast(`${coupon.code} applied`)
       return true
     } catch (error) {
@@ -249,6 +260,7 @@ export const POSProvider = ({ children }) => {
   }
 
   const removeCoupon = () => {
+    setPreviewTotals(null)
     setAppliedCoupon(null)
     showToast('Coupon removed')
   }

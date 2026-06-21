@@ -320,6 +320,7 @@ const TableSelfOrder = () => {
 
       await verifyCustomerRazorpayPayment(placedOrder.orderId, {
         table_token: token,
+        payment_method: method === 'upi' ? 'UPI' : 'CARD',
         razorpay_order_id: paymentResult.razorpay_order_id,
         razorpay_payment_id: paymentResult.razorpay_payment_id,
         razorpay_signature: paymentResult.razorpay_signature,

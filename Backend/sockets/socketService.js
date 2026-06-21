@@ -91,6 +91,16 @@ class SocketService {
       console.error("[SOCKET SERVICE] Failed to notify customer display of checkout completion:", error.message);
     }
   }
+
+  notifyPOSSessionUpdated(sessionData = {}) {
+    try {
+      const io = getSocketIO();
+      io.to("admin").emit("admin:sessionUpdated", sessionData);
+      console.log("[SOCKET SERVICE] Broadcasted admin:sessionUpdated", sessionData);
+    } catch (error) {
+      console.error("[SOCKET SERVICE] Failed to notify admin of session update:", error.message);
+    }
+  }
 }
 
 module.exports = new SocketService();

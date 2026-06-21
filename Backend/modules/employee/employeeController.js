@@ -104,6 +104,7 @@ async function openSession(req, res, next) {
 
     const [result] = await connection.query(employeeQueries.OPEN_SESSION, [employeeId, opening_amount]);
     const sessionId = result.insertId;
+    socketService.notifyPOSSessionUpdated({ sessionId, action: "OPENED" });
 
     res.status(201).json({
       success: true,
@@ -148,6 +149,7 @@ async function closeSession(req, res, next) {
     const discrepancy = parseFloat(closing_amount) - expectedClosing;
 
     await connection.query(employeeQueries.CLOSE_SESSION, [closing_amount, id]);
+    socketService.notifyPOSSessionUpdated({ sessionId: Number(id), action: "CLOSED" });
 
     res.status(200).json({
       success: true,
@@ -194,6 +196,19 @@ async function getTableQRCode(req, res, next) {
     res.status(200).json({ success: true, url, qrDataUrl });
   } catch (error) {
     next(error);
+  }
+}
+
+async function listPaymentMethods(req, res, next) {
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    const [methods] = await connection.query(employeeQueries.LIST_POS_PAYMENT_METHODS);
+    res.status(200).json({ success: true, paymentMethods: methods });
+  } catch (error) {
+    next(error);
+  } finally {
+    if (connection) connection.release();
   }
 }
 
@@ -553,6 +568,7 @@ async function createOrder(req, res, next) {
     }
 
     await connection.commit();
+    socketService.notifyPOSSessionUpdated({ sessionId: session.id, orderId, action: "ORDER_CREATED" });
     res.status(201).json({
       success: true,
       message: "POS Order created as DRAFT successfully",
@@ -855,6 +871,7 @@ async function verifyEmployeeRazorpayPayment(req, res, next) {
     }
 
     await connection.commit();
+    socketService.notifyPOSSessionUpdated({ sessionId: order.session_id, orderId: Number(id), action: "PAYMENT_SUCCESS" });
 
     if (shouldSendToKitchen) {
       const [updatedOrders] = await connection.query(employeeQueries.GET_ORDER, [id]);
@@ -899,6 +916,17 @@ async function payOrder(req, res, next) {
     connection = await pool.getConnection();
     await connection.beginTransaction();
 
+    if (String(payment_method).toUpperCase() === "CASH") {
+      const [cashMethods] = await connection.query(employeeQueries.GET_PAYMENT_METHOD_SETTING, ["%CASH%"]);
+      if (cashMethods.length === 0 || Number(cashMethods[0].is_enabled) !== 1) {
+        await connection.rollback();
+        return res.status(403).json({
+          success: false,
+          message: "Cash payment is disabled by admin"
+        });
+      }
+    }
+
     const [orders] = await connection.query("SELECT * FROM orders WHERE id = ?", [id]);
     if (orders.length === 0) {
       await connection.rollback();
@@ -927,6 +955,7 @@ async function payOrder(req, res, next) {
     }
 
     await connection.commit();
+    socketService.notifyPOSSessionUpdated({ sessionId: order.session_id, orderId: Number(id), action: "PAYMENT_SUCCESS" });
 
     if (shouldSendToKitchen) {
       const [updatedOrders] = await connection.query(employeeQueries.GET_ORDER, [id]);
@@ -1168,6 +1197,7 @@ module.exports = {
   getLastSession,
   listPosTables,
   getTableQRCode,
+  listPaymentMethods,
   openSession,
   closeSession,
   searchCustomers,

@@ -1,5 +1,5 @@
 /* eslint-disable react-refresh/only-export-components */
-import { createContext, useContext, useMemo, useState } from 'react'
+import { createContext, useContext, useEffect, useMemo, useState } from 'react'
 import { loginUser, signupUser } from '../api/authApi'
 import { ROLE_HOME } from '../utils/dummyUsers'
 
@@ -81,6 +81,12 @@ export const AuthProvider = ({ children }) => {
     localStorage.removeItem(REFRESH_TOKEN_KEY)
     setUser(null)
   }
+
+  useEffect(() => {
+    const handleAuthLogout = () => setUser(null)
+    window.addEventListener('auth:logout', handleAuthLogout)
+    return () => window.removeEventListener('auth:logout', handleAuthLogout)
+  }, [])
 
   const value = useMemo(
     () => ({

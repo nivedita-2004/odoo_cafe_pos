@@ -35,12 +35,27 @@ const formatTime = (value) =>
       })
     : '-'
 
+const ordersPerPage = 6
+
+const isToday = (value) => {
+  if (!value) return false
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return false
+  const today = new Date()
+  return (
+    date.getFullYear() === today.getFullYear() &&
+    date.getMonth() === today.getMonth() &&
+    date.getDate() === today.getDate()
+  )
+}
+
 const KitchenDisplay = () => {
   const [orders, setOrders] = useState([])
   const [isLoading, setIsLoading] = useState(true)
   const [savingId, setSavingId] = useState(null)
   const [error, setError] = useState('')
   const [activeTab, setActiveTab] = useState('ALL')
+  const [currentPage, setCurrentPage] = useState(1)
 
   const loadOrders = async (showLoader = false) => {
     try {
@@ -73,21 +88,41 @@ const KitchenDisplay = () => {
     return () => window.clearInterval(timer)
   }, [])
 
-  const stats = useMemo(
-    () => ({
-      all: orders.length,
-      toCook: orders.filter((order) => order.status === 'TO_COOK').length,
-      preparing: orders.filter((order) => order.status === 'PREPARING').length,
-      completed: orders.filter((order) => order.status === 'COMPLETED').length,
-      items: orders.reduce((sum, order) => sum + (order.items || []).length, 0),
-    }),
+  const todayOrders = useMemo(
+    () => orders.filter((order) => isToday(order.created_at)),
     [orders],
   )
 
+  const stats = useMemo(
+    () => ({
+      all: todayOrders.length,
+      toCook: todayOrders.filter((order) => order.status === 'TO_COOK').length,
+      preparing: todayOrders.filter((order) => order.status === 'PREPARING').length,
+      completed: todayOrders.filter((order) => order.status === 'COMPLETED').length,
+      items: todayOrders.reduce((sum, order) => sum + (order.items || []).length, 0),
+    }),
+    [todayOrders],
+  )
+
   const filteredOrders = useMemo(() => {
-    if (activeTab === 'ALL') return orders
-    return orders.filter((order) => order.status === activeTab)
-  }, [orders, activeTab])
+    if (activeTab === 'ALL') return todayOrders
+    return todayOrders.filter((order) => order.status === activeTab)
+  }, [todayOrders, activeTab])
+
+  const totalPages = Math.max(1, Math.ceil(filteredOrders.length / ordersPerPage))
+  const safeCurrentPage = Math.min(currentPage, totalPages)
+  const paginatedOrders = filteredOrders.slice(
+    (safeCurrentPage - 1) * ordersPerPage,
+    safeCurrentPage * ordersPerPage,
+  )
+
+  const goToPage = (page) => {
+    setCurrentPage(Math.min(Math.max(page, 1), totalPages))
+  }
+
+  useEffect(() => {
+    setCurrentPage(1)
+  }, [activeTab, todayOrders.length])
 
   const tabs = [
     { label: 'All Orders', value: 'ALL', count: stats.all },
@@ -128,9 +163,7 @@ const KitchenDisplay = () => {
                     Live KDS
                   </p>
                   <h1 className="text-xl font-black md:text-2xl">Kitchen Display System</h1>
-                  <p className="mt-0.5 text-xs font-semibold text-[#2D1B0E]/55">
-                    Auto refresh every 15 seconds
-                  </p>
+                  
                 </div>
               </div>
 
@@ -228,7 +261,7 @@ const KitchenDisplay = () => {
         ) : null}
 
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-          {filteredOrders.map((order) => (
+          {paginatedOrders.map((order) => (
             <article
               key={order.id}
               className="overflow-hidden rounded-[24px] bg-white shadow-sm ring-1 ring-[#F5E6D3] transition hover:-translate-y-0.5 hover:shadow-[0_16px_40px_rgba(45,27,14,0.08)]"
@@ -325,6 +358,47 @@ const KitchenDisplay = () => {
             </article>
           ))}
         </div>
+
+        {!isLoading && filteredOrders.length > 0 ? (
+          <div className="mt-5 flex flex-col gap-3 rounded-2xl bg-white p-3 shadow-sm ring-1 ring-[#F5E6D3] sm:flex-row sm:items-center sm:justify-between">
+            <p className="text-sm font-bold text-[#2D1B0E]/55">
+              Showing {(safeCurrentPage - 1) * ordersPerPage + 1}-
+              {Math.min(safeCurrentPage * ordersPerPage, filteredOrders.length)} of {filteredOrders.length}
+            </p>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => goToPage(safeCurrentPage - 1)}
+                disabled={safeCurrentPage === 1}
+                className="rounded-xl border border-[#E7D8C9] px-3 py-2 text-xs font-black text-[#8B4513] disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                Prev
+              </button>
+              {Array.from({ length: totalPages }, (_, index) => index + 1).map((page) => (
+                <button
+                  key={page}
+                  type="button"
+                  onClick={() => goToPage(page)}
+                  className={`h-9 min-w-9 rounded-xl px-3 text-xs font-black ${
+                    page === safeCurrentPage
+                      ? 'bg-[#8B4513] text-white'
+                      : 'border border-[#E7D8C9] text-[#8B4513] hover:bg-[#FFF8F0]'
+                  }`}
+                >
+                  {page}
+                </button>
+              ))}
+              <button
+                type="button"
+                onClick={() => goToPage(safeCurrentPage + 1)}
+                disabled={safeCurrentPage === totalPages}
+                className="rounded-xl border border-[#E7D8C9] px-3 py-2 text-xs font-black text-[#8B4513] disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                Next
+              </button>
+            </div>
+          </div>
+        ) : null}
       </section>
     </main>
   )

@@ -9,6 +9,7 @@ const {
   getLastSession,
   listPosTables,
   getTableQRCode,
+  listPaymentMethods,
   openSession,
   closeSession,
   searchCustomers,
@@ -61,6 +62,7 @@ router.put("/orders/:id/status", updateOrderStatus);
 router.post("/orders/:id/send-to-kitchen", sendToKitchen);
 
 // Payment processing
+router.get("/payment-methods", listPaymentMethods);
 router.get("/orders/:id/upi-qr", getUPIQrCode);
 router.post("/orders/:id/razorpay-order", createEmployeeRazorpayOrder);
 router.post("/orders/:id/razorpay-verify", verifyEmployeeRazorpayPayment);

@@ -213,14 +213,17 @@ module.exports = {
     FROM payment_methods pm
     LEFT JOIN (
       SELECT 
-        UPPER(payment_method) AS method_key,
+        CASE
+          WHEN UPPER(payment_method) = 'RAZORPAY' THEN 'CARD'
+          ELSE UPPER(payment_method)
+        END AS method_key,
         COUNT(*) AS transactions_today,
         SUM(amount) AS amount_today,
         payment_status
       FROM payments
       WHERE payment_status = 'SUCCESS'
         AND DATE(created_at) = CURDATE()
-      GROUP BY UPPER(payment_method), payment_status
+      GROUP BY method_key, payment_status
     ) stats ON stats.method_key = CASE
       WHEN UPPER(pm.name) LIKE '%CASH%' THEN 'CASH'
       WHEN UPPER(pm.name) LIKE '%UPI%' THEN 'UPI'
@@ -341,14 +344,25 @@ module.exports = {
       s.*,
       u.name AS employee_name,
       COUNT(DISTINCT o.id) AS orders_count,
-      COALESCE(SUM(CASE WHEN UPPER(p.payment_method) = 'CASH' THEN p.amount ELSE 0 END), 0) AS cash_sales,
-      COALESCE(SUM(CASE WHEN UPPER(p.payment_method) = 'UPI' THEN p.amount ELSE 0 END), 0) AS upi_sales,
-      COALESCE(SUM(CASE WHEN UPPER(p.payment_method) = 'CARD' THEN p.amount ELSE 0 END), 0) AS card_sales,
-      COALESCE(SUM(CASE WHEN p.payment_status = 'SUCCESS' THEN p.amount ELSE 0 END), 0) AS total_sales
+      COALESCE(SUM(o.total_amount), 0) AS orders_total_amount,
+      COALESCE(SUM(ps.cash_sales), 0) AS cash_sales,
+      COALESCE(SUM(ps.upi_sales), 0) AS upi_sales,
+      COALESCE(SUM(ps.card_sales), 0) AS card_sales,
+      COALESCE(SUM(ps.total_sales), 0) AS total_sales
     FROM pos_sessions s
     JOIN users u ON s.employee_id = u.id
     LEFT JOIN orders o ON o.session_id = s.id
-    LEFT JOIN payments p ON p.order_id = o.id
+    LEFT JOIN (
+      SELECT
+        order_id,
+        COALESCE(SUM(CASE WHEN UPPER(payment_method) = 'CASH' THEN amount ELSE 0 END), 0) AS cash_sales,
+        COALESCE(SUM(CASE WHEN UPPER(payment_method) = 'UPI' THEN amount ELSE 0 END), 0) AS upi_sales,
+        COALESCE(SUM(CASE WHEN UPPER(payment_method) IN ('CARD', 'RAZORPAY') THEN amount ELSE 0 END), 0) AS card_sales,
+        COALESCE(SUM(CASE WHEN payment_status = 'SUCCESS' THEN amount ELSE 0 END), 0) AS total_sales
+      FROM payments
+      WHERE payment_status = 'SUCCESS'
+      GROUP BY order_id
+    ) ps ON ps.order_id = o.id
     GROUP BY s.id, u.name
     ORDER BY s.opening_time DESC
   `

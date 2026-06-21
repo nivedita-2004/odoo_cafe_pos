@@ -11,6 +11,7 @@ import {
 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { joinSocketRoom } from '../../api/socketClient'
 import { closePosSession, getAdminPosSessions } from '../../api/posSessionsApi'
 import { formatCurrency } from '../../utils/formatCurrency'
 
@@ -31,6 +32,16 @@ const formatDateTime = (value) =>
     : '-'
 
 const toNumber = (value) => Number(value || 0)
+const sessionsPerPage = 6
+
+const isWithinLastWeek = (value) => {
+  if (!value) return false
+  const sessionDate = new Date(value)
+  if (Number.isNaN(sessionDate.getTime())) return false
+  const sevenDaysAgo = new Date()
+  sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7)
+  return sessionDate >= sevenDaysAgo
+}
 
 const normalizeSession = (session) => ({
   id: session.id,
@@ -45,6 +56,7 @@ const normalizeSession = (session) => ({
   cashSales: toNumber(session.cash_sales),
   upiSales: toNumber(session.upi_sales),
   cardSales: toNumber(session.card_sales),
+  orderAmount: toNumber(session.orders_total_amount),
   orders: Number(session.orders_count || 0),
 })
 
@@ -88,10 +100,11 @@ const POSSession = () => {
   const [isLoading, setIsLoading] = useState(true)
   const [isSaving, setIsSaving] = useState(false)
   const [error, setError] = useState('')
+  const [currentPage, setCurrentPage] = useState(1)
 
-  const loadSessions = async () => {
+  const loadSessions = async (showLoader = true) => {
     try {
-      setIsLoading(true)
+      if (showLoader) setIsLoading(true)
       setError('')
       const response = await getAdminPosSessions()
       setSessions((response.data.sessions || []).map(normalizeSession))
@@ -103,29 +116,49 @@ const POSSession = () => {
   }
 
   useEffect(() => {
-    const loadInitialSessions = async () => {
-      try {
-        setIsLoading(true)
-        setError('')
-        const response = await getAdminPosSessions()
-        setSessions((response.data.sessions || []).map(normalizeSession))
-      } catch (err) {
-        setError(err.response?.data?.message || 'Unable to load POS sessions.')
-      } finally {
-        setIsLoading(false)
-      }
-    }
+    loadSessions()
 
-    loadInitialSessions()
+    const refreshTimer = window.setInterval(() => {
+      loadSessions(false)
+    }, 15000)
+
+    const socket = joinSocketRoom('admin')
+    const refreshSessions = () => loadSessions(false)
+
+    socket.off('admin:sessionUpdated', refreshSessions)
+    socket.on('admin:sessionUpdated', refreshSessions)
+
+    return () => {
+      window.clearInterval(refreshTimer)
+      socket.off('admin:sessionUpdated', refreshSessions)
+    }
   }, [])
 
-  const openSession = sessions.find((session) => session.status === 'Open')
-  const lastClosedSession = sessions.find((session) => session.status === 'Closed')
+  const recentSessions = useMemo(
+    () => sessions.filter((session) => session.status === 'Open' || isWithinLastWeek(session.openedAt)),
+    [sessions],
+  )
+
+  const totalPages = Math.max(1, Math.ceil(recentSessions.length / sessionsPerPage))
+  const safeCurrentPage = Math.min(currentPage, totalPages)
+  const paginatedSessions = recentSessions.slice(
+    (safeCurrentPage - 1) * sessionsPerPage,
+    safeCurrentPage * sessionsPerPage,
+  )
+
+  const goToPage = (page) => {
+    setCurrentPage(Math.min(Math.max(page, 1), totalPages))
+  }
+
+  useEffect(() => {
+    setCurrentPage(1)
+  }, [recentSessions.length])
+
+  const openSession = recentSessions.find((session) => session.status === 'Open')
+  const lastClosedSession = recentSessions.find((session) => session.status === 'Closed')
 
   const summaryCards = useMemo(() => {
-    const currentSales = openSession
-      ? openSession.cashSales + openSession.upiSales + openSession.cardSales
-      : 0
+    const currentSales = openSession ? openSession.orderAmount : 0
 
     return [
       {
@@ -246,10 +279,10 @@ const POSSession = () => {
         ) : null}
 
         <div className="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-          {sessions.map((session) => {
+          {paginatedSessions.map((session) => {
             const totalSale =
               session.status === 'Open'
-                ? session.cashSales + session.upiSales + session.cardSales
+                ? session.orderAmount
                 : session.closingSaleAmount
 
             return (
@@ -306,13 +339,54 @@ const POSSession = () => {
           })}
         </div>
 
-        {!isLoading && sessions.length === 0 ? (
+        {!isLoading && recentSessions.length === 0 ? (
           <div className="mt-5 rounded-lg border border-dashed border-slate-200 bg-slate-50 p-8 text-center">
             <CalendarClock className="mx-auto h-9 w-9 text-slate-400" />
             <h3 className="mt-3 text-base font-black text-slate-900">No sessions found</h3>
             <p className="mt-2 text-sm font-semibold text-slate-500">
               Open a POS session to start tracking shift sales.
             </p>
+          </div>
+        ) : null}
+
+        {!isLoading && recentSessions.length > 0 ? (
+          <div className="mt-5 flex flex-col gap-3 border-t border-slate-100 pt-4 sm:flex-row sm:items-center sm:justify-between">
+            <p className="text-sm font-bold text-slate-500">
+              Showing {(safeCurrentPage - 1) * sessionsPerPage + 1}-
+              {Math.min(safeCurrentPage * sessionsPerPage, recentSessions.length)} of {recentSessions.length}
+            </p>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => goToPage(safeCurrentPage - 1)}
+                disabled={safeCurrentPage === 1}
+                className="rounded-lg border border-slate-200 px-3 py-2 text-xs font-black text-slate-600 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                Prev
+              </button>
+              {Array.from({ length: totalPages }, (_, index) => index + 1).map((page) => (
+                <button
+                  key={page}
+                  type="button"
+                  onClick={() => goToPage(page)}
+                  className={`h-9 min-w-9 rounded-lg px-3 text-xs font-black ${
+                    page === safeCurrentPage
+                      ? 'bg-[#c8793f] text-white'
+                      : 'border border-slate-200 text-slate-600 hover:bg-slate-50'
+                  }`}
+                >
+                  {page}
+                </button>
+              ))}
+              <button
+                type="button"
+                onClick={() => goToPage(safeCurrentPage + 1)}
+                disabled={safeCurrentPage === totalPages}
+                className="rounded-lg border border-slate-200 px-3 py-2 text-xs font-black text-slate-600 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                Next
+              </button>
+            </div>
           </div>
         ) : null}
       </section>
@@ -341,6 +415,7 @@ const POSSession = () => {
                   'Closing Sale Amount',
                   formatCurrency(
                     selectedSession.closingSaleAmount ||
+                      selectedSession.orderAmount ||
                       selectedSession.cashSales + selectedSession.upiSales + selectedSession.cardSales,
                   ),
                   IndianRupee,

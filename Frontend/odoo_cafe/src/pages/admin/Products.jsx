@@ -52,6 +52,7 @@ const inputClass =
   'h-11 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-800 outline-none transition focus:border-[#c8793f] focus:ring-2 focus:ring-[#fcd8b8]'
 
 const taxToNumber = (tax) => Number(String(tax).replace('%', '')) || 0
+const productsPerPage = 8
 
 const normalizeCategory = (category) => ({
   id: category.id,
@@ -139,6 +140,7 @@ const Products = () => {
   const [isLoading, setIsLoading] = useState(true)
   const [isSaving, setIsSaving] = useState(false)
   const [error, setError] = useState('')
+  const [currentPage, setCurrentPage] = useState(1)
   const { searchQuery } = useGlobalSearch()
 
   const loadProducts = async () => {
@@ -222,6 +224,21 @@ const Products = () => {
         return second.id - first.id
       })
   }, [categoryFilter, priceSort, products, searchQuery, searchTerm, statusFilter])
+
+  const totalPages = Math.max(1, Math.ceil(filteredProducts.length / productsPerPage))
+  const safeCurrentPage = Math.min(currentPage, totalPages)
+  const paginatedProducts = filteredProducts.slice(
+    (safeCurrentPage - 1) * productsPerPage,
+    safeCurrentPage * productsPerPage,
+  )
+
+  const goToPage = (page) => {
+    setCurrentPage(Math.min(Math.max(page, 1), totalPages))
+  }
+
+  useEffect(() => {
+    setCurrentPage(1)
+  }, [categoryFilter, priceSort, searchQuery, searchTerm, statusFilter])
 
   const openAddModal = () => {
     setSelectedProduct(null)
@@ -429,7 +446,7 @@ const Products = () => {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {filteredProducts.map((product) => (
+              {paginatedProducts.map((product) => (
                 <tr key={product.id} className="text-sm">
                   <td className="py-2 pr-4">
                     <div className="flex items-center gap-3">
@@ -476,6 +493,47 @@ const Products = () => {
             <p className="mt-2 text-sm font-semibold text-slate-500">
               Try changing your search or filters.
             </p>
+          </div>
+        ) : null}
+
+        {!isLoading && filteredProducts.length > 0 ? (
+          <div className="mt-5 flex flex-col gap-3 border-t border-slate-100 pt-4 sm:flex-row sm:items-center sm:justify-between">
+            <p className="text-sm font-bold text-slate-500">
+              Showing {(safeCurrentPage - 1) * productsPerPage + 1}-
+              {Math.min(safeCurrentPage * productsPerPage, filteredProducts.length)} of {filteredProducts.length}
+            </p>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => goToPage(safeCurrentPage - 1)}
+                disabled={safeCurrentPage === 1}
+                className="rounded-lg border border-slate-200 px-3 py-2 text-xs font-black text-slate-600 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                Prev
+              </button>
+              {Array.from({ length: totalPages }, (_, index) => index + 1).map((page) => (
+                <button
+                  key={page}
+                  type="button"
+                  onClick={() => goToPage(page)}
+                  className={`h-9 min-w-9 rounded-lg px-3 text-xs font-black ${
+                    page === safeCurrentPage
+                      ? 'bg-[#c8793f] text-white'
+                      : 'border border-slate-200 text-slate-600 hover:bg-slate-50'
+                  }`}
+                >
+                  {page}
+                </button>
+              ))}
+              <button
+                type="button"
+                onClick={() => goToPage(safeCurrentPage + 1)}
+                disabled={safeCurrentPage === totalPages}
+                className="rounded-lg border border-slate-200 px-3 py-2 text-xs font-black text-slate-600 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                Next
+              </button>
+            </div>
           </div>
         ) : null}
       </section>
